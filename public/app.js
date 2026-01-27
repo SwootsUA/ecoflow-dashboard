@@ -97,11 +97,16 @@ function setRoute(route) {
 
 function showPage(which) {
   const isSettings = which === "settings";
+  const isGraphs = which === "graphs";
+  const isDashboard = !isSettings && !isGraphs;
+
   el.pageSettings.classList.toggle("hidden", !isSettings);
-  el.pageDashboard.classList.toggle("hidden", isSettings);
+  el.pageDashboard.classList.toggle("hidden", !isDashboard);
+  el.pageGraphs.classList.toggle("hidden", !isGraphs);
 
   el.navSettings.classList.toggle("active", isSettings);
-  el.navDashboard.classList.toggle("active", !isSettings);
+  el.navDashboard.classList.toggle("active", isDashboard);
+  el.navGraphs.classList.toggle("active", isGraphs);
 }
 
 function route() {
@@ -117,6 +122,13 @@ function route() {
 function renderGraphs(rows) {
   if (!window.Chart) return;
 
+  for (const k of Object.keys(state.charts)) {
+    try {
+      state.charts[k]?.destroy();
+    } catch {}
+  }
+  state.charts = {};
+
   const labels = rows.map((r) => new Date(r.ts).toLocaleTimeString());
   const soc = rows.map((r) => r.soc ?? null);
   const wattsIn = rows.map((r) => r.watts_in ?? null);
@@ -124,8 +136,11 @@ function renderGraphs(rows) {
   const battV = rows.map((r) => (r.batt_vol_mv ? r.batt_vol_mv / 1000 : null));
   const battTemp = rows.map((r) => r.batt_temp_c ?? null);
 
-  new Chart(el.chartSoc, { type: "line", data: { labels, datasets: [{ label: "SOC %", data: soc }] } });
-  new Chart(el.chartPower, {
+  state.charts.soc = new Chart(el.chartSoc, {
+    type: "line",
+    data: { labels, datasets: [{ label: "SOC %", data: soc }] },
+  });
+  state.charts.power = new Chart(el.chartPower, {
     type: "line",
     data: {
       labels,
@@ -135,17 +150,41 @@ function renderGraphs(rows) {
       ],
     },
   });
-  new Chart(el.chartBattV, { type: "line", data: { labels, datasets: [{ label: "Battery V", data: battV }] } });
-  new Chart(el.chartBattTemp, { type: "line", data: { labels, datasets: [{ label: "Battery °C", data: battTemp }] } });
+  state.charts.battV = new Chart(el.chartBattV, {
+    type: "line",
+    data: { labels, datasets: [{ label: "Battery V", data: battV }] },
+  });
+  state.charts.battTemp = new Chart(el.chartBattTemp, {
+    type: "line",
+    data: { labels, datasets: [{ label: "Battery °C", data: battTemp }] },
+  });
 }
 
 async function refreshGraphs() {
-  if (!state.selectedSn) return;
-  const range = el.graphsRange.value;
-  const res = await fetch(`/api/log/${state.selectedSn}?range=${range}`);
-  const json = await res.json();
-  state.logData = json.data || [];
-  renderGraphs(state.logData);
+  el.graphsError?.classList.add("hidden");
+  el.graphsError && (el.graphsError.textContent = "");
+
+  if (!state.selectedSn) {
+    if (el.graphsError) {
+      el.graphsError.textContent = "Select a device on the Dashboard first.";
+      el.graphsError.classList.remove("hidden");
+    }
+    return;
+  }
+
+  try {
+    const range = el.graphsRange.value;
+    const res = await fetch(`/api/log/${state.selectedSn}?range=${range}`);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error || `Request failed: ${res.status}`);
+    state.logData = json.data || [];
+    renderGraphs(state.logData);
+  } catch (e) {
+    if (el.graphsError) {
+      el.graphsError.textContent = e?.message || String(e);
+      el.graphsError.classList.remove("hidden");
+    }
+  }
 }
 
 window.addEventListener("hashchange", route);
