@@ -74,7 +74,30 @@ async function maybeAppendLog({ sn, data }) {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
+
+// (1) Disable caching for static assets (helps when you update app.js/index.html)
+app.use(
+  express.static(path.join(__dirname, "public"), {
+    extensions: ["html"],
+    etag: false,
+    lastModified: false,
+    maxAge: 0,
+    setHeaders(res) {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    },
+  }),
+);
+
+// (2) Disable caching for all API responses
+app.use("/api", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+  next();
+});
 
 function getKeys(req) {
   const accessKey = req.get("x-ecoflow-accesskey") || process.env.ECOFLOW_ACCESS_KEY;
@@ -151,8 +174,12 @@ async function ecoflowRequest({ method, path, queryString = "", accessKey, secre
   const signature = signHmacSha256Hex(secretKey, base);
 
   const url = `${ECOFLOW_BASE_URL}${path}${queryString}`;
+
+  // (3) Ask upstream not to cache + force fetch to not use cache
   const headers = {
     "Content-Type": "application/json;charset=UTF-8",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
     accessKey,
     nonce,
     timestamp,
@@ -163,6 +190,7 @@ async function ecoflowRequest({ method, path, queryString = "", accessKey, secre
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
   });
 
   const text = await resp.text();
