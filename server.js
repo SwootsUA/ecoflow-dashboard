@@ -2,12 +2,75 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import fs from "fs/promises";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT ?? 8080;
 const ECOFLOW_BASE_URL = process.env.ECOFLOW_BASE_URL ?? "https://api-e.ecoflow.com";
+const ENABLE_LOGGING = (process.env.ENABLE_LOGGING ?? "1") !== "0";
+const LOG_DIR = process.env.LOG_DIR ?? path.join(__dirname, "logs");
+const LOG_MIN_INTERVAL_MS = Math.max(0, Number(process.env.LOG_MIN_INTERVAL_MS ?? 10_000));
+const lastLoggedAtBySn = new Map();
+
+function safeSn(sn) {
+  return String(sn).replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function dayKeyFromMs(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function logFilePath(sn, dayKey) {
+  return path.join(LOG_DIR, `${safeSn(sn)}-${dayKey}.jsonl`);
+}
+
+async function ensureLogDir() {
+  await fs.mkdir(LOG_DIR, { recursive: true });
+}
+
+function pick(obj, keys) {
+  if (!obj || typeof obj !== "object") return undefined;
+  for (const k of keys) {
+    if (Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) return obj[k];
+  }
+}
+
+function extractMainDatapoints(data) {
+  return {
+    soc: pick(data, ["pd.soc", "soc", "bms_bmsStatus.soc"]),
+    watts_in: pick(data, ["pd.wattsInSum", "pd.inputWatts", "mppt.inWatts"]),
+    watts_out: pick(data, ["pd.wattsOutSum", "pd.outputWatts"]),
+    remain_min: pick(data, ["pd.remainTime"]),
+    batt_vol_mv: pick(data, ["bms_bmsStatus.vol"]),
+    batt_temp_c: pick(data, ["bms_bmsStatus.temp"]),
+    inv_temp_c: pick(data, ["inv.outTemp"]),
+    mppt_temp_c: pick(data, ["mppt.mpptTemp"]),
+    wifi_rssi: pick(data, ["pd.wifiRssi"]),
+  };
+}
+
+async function maybeAppendLog({ sn, data }) {
+  if (!ENABLE_LOGGING) return;
+
+  const now = Date.now();
+  const prev = lastLoggedAtBySn.get(sn) ?? 0;
+  if (LOG_MIN_INTERVAL_MS && now - prev < LOG_MIN_INTERVAL_MS) return;
+  lastLoggedAtBySn.set(sn, now);
+
+  await ensureLogDir();
+
+  const record = {
+    ts: now,
+    iso: new Date(now).toISOString(),
+    sn,
+    ...extractMainDatapoints(data),
+  };
+
+  const file = logFilePath(sn, dayKeyFromMs(now));
+  await fs.appendFile(file, JSON.stringify(record) + "\n", "utf8");
+}
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -19,7 +82,7 @@ function getKeys(req) {
 
   if (!accessKey || !secretKey) {
     const err = new Error(
-      "Missing EcoFlow keys. Set ECOFLOW_ACCESS_KEY/ECOFLOW_SECRET_KEY env vars or pass X-Ecoflow-AccessKey/X-Ecoflow-SecretKey headers."
+      "Missing EcoFlow keys. Set ECOFLOW_ACCESS_KEY/ECOFLOW_SECRET_KEY env vars or pass X-Ecoflow-AccessKey/X-Ecoflow-SecretKey headers.",
     );
     err.status = 400;
     throw err;
@@ -82,7 +145,7 @@ async function ecoflowRequest({ method, path, queryString = "", accessKey, secre
     accessKey,
     nonce,
     timestamp,
-    bodyOrParams: signData ?? body ?? {}
+    bodyOrParams: signData ?? body ?? {},
   });
 
   const signature = signHmacSha256Hex(secretKey, base);
@@ -93,13 +156,13 @@ async function ecoflowRequest({ method, path, queryString = "", accessKey, secre
     accessKey,
     nonce,
     timestamp,
-    sign: signature
+    sign: signature,
   };
 
   const resp = await fetch(url, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined
+    body: body ? JSON.stringify(body) : undefined,
   });
 
   const text = await resp.text();
@@ -128,7 +191,7 @@ app.get("/api/devices", async (req, res, next) => {
       path: "/iot-open/sign/device/list",
       accessKey,
       secretKey,
-      signData: {}
+      signData: {},
     });
     res.json(json);
   } catch (e) {
@@ -147,8 +210,12 @@ app.get("/api/status/:sn", async (req, res, next) => {
       queryString: `?sn=${encodeURIComponent(sn)}`,
       accessKey,
       secretKey,
-      signData: {}
+      signData: {},
     });
+
+    if (json && json.data) {
+      maybeAppendLog({ sn, data: json.data }).catch(() => {});
+    }
 
     res.json(json);
   } catch (e) {
@@ -176,10 +243,44 @@ app.post("/api/quota/:sn", async (req, res, next) => {
       accessKey,
       secretKey,
       body,
-      signData: body
+      signData: body,
     });
 
     res.json(json);
+  } catch (e) {
+    next(e);
+  }
+});
+
+function parseRangeMs(range) {
+  const m = String(range || "").match(/^(\d+)([mhd])$/i);
+  if (!m) return 86_400_000;
+  const n = Number(m[1]);
+  return m[2] === "m" ? n * 60_000 : m[2] === "h" ? n * 3_600_000 : n * 86_400_000;
+}
+
+app.get("/api/log/:sn", async (req, res, next) => {
+  try {
+    const sn = req.params.sn;
+    const now = Date.now();
+    const rangeMs = parseRangeMs(req.query.range);
+    const since = now - rangeMs;
+
+    await ensureLogDir();
+    const dayKey = dayKeyFromMs(now);
+    const file = logFilePath(sn, dayKey);
+
+    let rows = [];
+    try {
+      const text = await fs.readFile(file, "utf8");
+      rows = text
+        .split("\n")
+        .filter(Boolean)
+        .map(JSON.parse)
+        .filter((r) => r.ts >= since);
+    } catch {}
+
+    res.json({ sn, count: rows.length, data: rows });
   } catch (e) {
     next(e);
   }
@@ -189,7 +290,7 @@ app.use((err, req, res, next) => {
   const status = err.status || 500;
   res.status(status).json({
     error: err.message || "Unknown error",
-    details: err.details || undefined
+    details: err.details || undefined,
   });
 });
 

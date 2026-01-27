@@ -5,7 +5,10 @@ const state = {
   devices: [],
   selectedSn: "",
   lastStatus: null,
-  timer: null
+  timer: null,
+  charts: {},
+  logData: [],
+  csvUrl: null,
 };
 
 const el = {
@@ -38,12 +41,32 @@ const el = {
 
   powerBreakdown: document.getElementById("powerBreakdown"),
   batteryDetails: document.getElementById("batteryDetails"),
-  cellVoltages: document.getElementById("cellVoltages")
+  cellVoltages: document.getElementById("cellVoltages"),
+
+  pageGraphs: document.getElementById("pageGraphs"),
+  navGraphs: document.getElementById("navGraphs"),
+
+  graphsRange: document.getElementById("graphsRange"),
+  graphsRefresh: document.getElementById("graphsRefresh"),
+  graphsDownload: document.getElementById("graphsDownload"),
+  graphsError: document.getElementById("graphsError"),
+
+  chartSoc: document.getElementById("chartSoc"),
+  chartPower: document.getElementById("chartPower"),
+  chartBattV: document.getElementById("chartBattV"),
+  chartBattTemp: document.getElementById("chartBattTemp"),
 };
 
 function loadConfig() {
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return { accessKey: "", secretKey: "", refreshMs: 2000, autoRefresh: true, lastSn: "" };
+  if (!raw)
+    return {
+      accessKey: "",
+      secretKey: "",
+      refreshMs: 2000,
+      autoRefresh: true,
+      lastSn: "",
+    };
   try {
     const parsed = JSON.parse(raw);
     return {
@@ -51,10 +74,16 @@ function loadConfig() {
       secretKey: parsed.secretKey ?? "",
       refreshMs: Number(parsed.refreshMs ?? 2000),
       autoRefresh: Boolean(parsed.autoRefresh ?? true),
-      lastSn: parsed.lastSn ?? ""
+      lastSn: parsed.lastSn ?? "",
     };
   } catch {
-    return { accessKey: "", secretKey: "", refreshMs: 2000, autoRefresh: true, lastSn: "" };
+    return {
+      accessKey: "",
+      secretKey: "",
+      refreshMs: 2000,
+      autoRefresh: true,
+      lastSn: "",
+    };
   }
 }
 
@@ -77,7 +106,46 @@ function showPage(which) {
 
 function route() {
   const h = location.hash || "#/dashboard";
+  if (h === "#/graphs") {
+    showPage("graphs");
+    refreshGraphs();
+    return;
+  }
   showPage(h === "#/settings" ? "settings" : "dashboard");
+}
+
+function renderGraphs(rows) {
+  if (!window.Chart) return;
+
+  const labels = rows.map((r) => new Date(r.ts).toLocaleTimeString());
+  const soc = rows.map((r) => r.soc ?? null);
+  const wattsIn = rows.map((r) => r.watts_in ?? null);
+  const wattsOut = rows.map((r) => r.watts_out ?? null);
+  const battV = rows.map((r) => (r.batt_vol_mv ? r.batt_vol_mv / 1000 : null));
+  const battTemp = rows.map((r) => r.batt_temp_c ?? null);
+
+  new Chart(el.chartSoc, { type: "line", data: { labels, datasets: [{ label: "SOC %", data: soc }] } });
+  new Chart(el.chartPower, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        { label: "In W", data: wattsIn },
+        { label: "Out W", data: wattsOut },
+      ],
+    },
+  });
+  new Chart(el.chartBattV, { type: "line", data: { labels, datasets: [{ label: "Battery V", data: battV }] } });
+  new Chart(el.chartBattTemp, { type: "line", data: { labels, datasets: [{ label: "Battery °C", data: battTemp }] } });
+}
+
+async function refreshGraphs() {
+  if (!state.selectedSn) return;
+  const range = el.graphsRange.value;
+  const res = await fetch(`/api/log/${state.selectedSn}?range=${range}`);
+  const json = await res.json();
+  state.logData = json.data || [];
+  renderGraphs(state.logData);
 }
 
 window.addEventListener("hashchange", route);
@@ -178,7 +246,6 @@ function addBarRow(label, valueWatts, maxWatts) {
   `;
 }
 
-
 function renderSummaryCards(data, deviceMeta) {
   const soc = pick(data, ["pd.soc", "soc", "pd.bpPowerSoc", "bms_emsStatus.lcdShowSoc", "bms_bmsStatus.soc"]);
 
@@ -212,26 +279,78 @@ function renderSummaryCards(data, deviceMeta) {
     { k: "SOC", v: fmtPercent(soc), s: productName },
     { k: "Input (total)", v: fmtWatts(wattsIn), s: "watts in" },
     { k: "Output (total)", v: fmtWatts(wattsOut), s: "watts out" },
-    { k: "Remain time", v: fmtRemainTimeSeconds(remain), s: "EcoFlow minutes → hours" },
+    {
+      k: "Remain time",
+      v: fmtRemainTimeSeconds(remain),
+      s: "EcoFlow minutes → hours",
+    },
 
     { k: "AC enabled", v: fmtBool(acEnabled), s: "state/config" },
-    { k: "AC in voltage", v: acInV === undefined ? "—" : fmtVoltsFromMilli(acInV), s: "inv.acInVol" },
-    { k: "AC out voltage", v: acOutV === undefined ? "—" : fmtVoltsFromMilli(acOutV), s: "inv.invOutVol" },
+    {
+      k: "AC in voltage",
+      v: acInV === undefined ? "—" : fmtVoltsFromMilli(acInV),
+      s: "inv.acInVol",
+    },
+    {
+      k: "AC out voltage",
+      v: acOutV === undefined ? "—" : fmtVoltsFromMilli(acOutV),
+      s: "inv.invOutVol",
+    },
     { k: "AC out freq", v: fmtFreq(acOutHz), s: "inv.invOutFreq" },
 
-    { k: "Battery voltage", v: battV === undefined ? "—" : fmtVoltsFromMilli(battV), s: "bms_bmsStatus.vol" },
-    { k: "Battery temp", v: battTemp === undefined ? "—" : `${Math.round(Number(battTemp))} °C`, s: "bms_bmsStatus.temp" },
-    { k: "Inverter temp", v: invTemp === undefined ? "—" : `${Math.round(Number(invTemp))} °C`, s: "inv.outTemp" },
-    { k: "MPPT temp", v: mpptTemp === undefined ? "—" : `${Math.round(Number(mpptTemp))} °C`, s: "mppt.mpptTemp" },
+    {
+      k: "Battery voltage",
+      v: battV === undefined ? "—" : fmtVoltsFromMilli(battV),
+      s: "bms_bmsStatus.vol",
+    },
+    {
+      k: "Battery temp",
+      v: battTemp === undefined ? "—" : `${Math.round(Number(battTemp))} °C`,
+      s: "bms_bmsStatus.temp",
+    },
+    {
+      k: "Inverter temp",
+      v: invTemp === undefined ? "—" : `${Math.round(Number(invTemp))} °C`,
+      s: "inv.outTemp",
+    },
+    {
+      k: "MPPT temp",
+      v: mpptTemp === undefined ? "—" : `${Math.round(Number(mpptTemp))} °C`,
+      s: "mppt.mpptTemp",
+    },
 
-    { k: "SOH", v: soh === undefined ? "—" : `${Math.round(Number(soh))}%`, s: "battery health" },
-    { k: "Cycles", v: cycles === undefined ? "—" : String(cycles), s: "charge cycles" },
-    { k: "Max charge SOC", v: maxChargeSoc === undefined ? "—" : `${maxChargeSoc}%`, s: "limit" },
-    { k: "Min discharge SOC", v: minDsgSoc === undefined ? "—" : `${minDsgSoc}%`, s: "limit" },
+    {
+      k: "SOH",
+      v: soh === undefined ? "—" : `${Math.round(Number(soh))}%`,
+      s: "battery health",
+    },
+    {
+      k: "Cycles",
+      v: cycles === undefined ? "—" : String(cycles),
+      s: "charge cycles",
+    },
+    {
+      k: "Max charge SOC",
+      v: maxChargeSoc === undefined ? "—" : `${maxChargeSoc}%`,
+      s: "limit",
+    },
+    {
+      k: "Min discharge SOC",
+      v: minDsgSoc === undefined ? "—" : `${minDsgSoc}%`,
+      s: "limit",
+    },
 
-    { k: "Wi-Fi RSSI", v: wifiRssi === undefined ? "—" : String(wifiRssi), s: "pd.wifiRssi" },
-    { k: "Online", v: online === undefined ? "—" : (Number(online) ? "Yes" : "No"), s: "device list" },
-    { k: "SN", v: state.selectedSn || "—", s: "" }
+    {
+      k: "Wi-Fi RSSI",
+      v: wifiRssi === undefined ? "—" : String(wifiRssi),
+      s: "pd.wifiRssi",
+    },
+    {
+      k: "Online",
+      v: online === undefined ? "—" : Number(online) ? "Yes" : "No",
+      s: "device list",
+    },
+    { k: "SN", v: state.selectedSn || "—", s: "" },
   ];
 
   el.summaryCards.innerHTML = items
@@ -242,7 +361,7 @@ function renderSummaryCards(data, deviceMeta) {
         <div class="v">${escapeHtml(String(x.v))}</div>
         <div class="s">${escapeHtml(String(x.s || ""))}</div>
       </div>
-    `
+    `,
     )
     .join("");
 }
@@ -296,12 +415,10 @@ function renderPowerBreakdown(data) {
     ["AC input", pick(data, ["inv.inputWatts"])],
     ["Device input (pd)", pick(data, ["pd.inputWatts"])],
     ["Solar (pd)", pick(data, ["pd.chgSunPower"])],
-    ["MPPT input", pick(data, ["mppt.inWatts"])]
+    ["MPPT input", pick(data, ["mppt.inWatts"])],
   ];
 
-  const rows = parts
-    .map(([label, v]) => [label, Number(v) || 0])
-    .filter(([, v]) => v !== 0);
+  const rows = parts.map(([label, v]) => [label, Number(v) || 0]).filter(([, v]) => v !== 0);
 
   let html = "";
   html += addBarRow("Total input", totalIn, max);
@@ -324,15 +441,34 @@ function renderBatteryDetails(data) {
     ["Design capacity", pick(data, ["bms_bmsStatus.designCap"])],
     ["Full capacity", pick(data, ["bms_bmsStatus.fullCap"])],
     ["Remaining capacity", pick(data, ["bms_bmsStatus.remainCap"])],
-    ["Battery voltage", pick(data, ["bms_bmsStatus.vol"]) !== undefined ? fmtVoltsFromMilli(pick(data, ["bms_bmsStatus.vol"])) : "—"],
-    ["Battery temp", pick(data, ["bms_bmsStatus.temp"]) !== undefined ? `${Math.round(Number(pick(data, ["bms_bmsStatus.temp"])))} °C` : "—"],
-    ["SOH", pick(data, ["bms_bmsStatus.soh", "bms_bmsInfo.soh"]) !== undefined ? `${Math.round(Number(pick(data, ["bms_bmsStatus.soh", "bms_bmsInfo.soh"])))}%` : "—"],
+    [
+      "Battery voltage",
+      pick(data, ["bms_bmsStatus.vol"]) !== undefined ? fmtVoltsFromMilli(pick(data, ["bms_bmsStatus.vol"])) : "—",
+    ],
+    [
+      "Battery temp",
+      pick(data, ["bms_bmsStatus.temp"]) !== undefined
+        ? `${Math.round(Number(pick(data, ["bms_bmsStatus.temp"])))} °C`
+        : "—",
+    ],
+    [
+      "SOH",
+      pick(data, ["bms_bmsStatus.soh", "bms_bmsInfo.soh"]) !== undefined
+        ? `${Math.round(Number(pick(data, ["bms_bmsStatus.soh", "bms_bmsInfo.soh"])))}%`
+        : "—",
+    ],
     ["Cycles", pick(data, ["bms_bmsStatus.cycles", "bms_bmsInfo.bsmCycles"])],
-    ["Max charge SOC", pick(data, ["bms_emsStatus.maxChargeSoc"]) !== undefined ? `${pick(data, ["bms_emsStatus.maxChargeSoc"])}%` : "—"],
-    ["Min discharge SOC", pick(data, ["bms_emsStatus.minDsgSoc"]) !== undefined ? `${pick(data, ["bms_emsStatus.minDsgSoc"])}%` : "—"],
+    [
+      "Max charge SOC",
+      pick(data, ["bms_emsStatus.maxChargeSoc"]) !== undefined ? `${pick(data, ["bms_emsStatus.maxChargeSoc"])}%` : "—",
+    ],
+    [
+      "Min discharge SOC",
+      pick(data, ["bms_emsStatus.minDsgSoc"]) !== undefined ? `${pick(data, ["bms_emsStatus.minDsgSoc"])}%` : "—",
+    ],
     ["AC enabled", fmtBool(pick(data, ["pd.acEnabled", "inv.cfgAcEnabled"]))],
     ["Beep", fmtBool(pick(data, ["mppt.beepState", "pd.beepMode"]))],
-    ["Wi-Fi RSSI", pick(data, ["pd.wifiRssi"])]
+    ["Wi-Fi RSSI", pick(data, ["pd.wifiRssi"])],
   ];
 
   el.batteryDetails.innerHTML = items
@@ -373,7 +509,6 @@ function renderCellVoltages(data) {
     .join("");
 }
 
-
 function normalizeDeviceList(apiResponse) {
   const data = apiResponse?.data;
 
@@ -387,7 +522,7 @@ function normalizeDeviceList(apiResponse) {
       sn: d.sn ?? d.SN ?? d.deviceSn ?? d.deviceSN,
       deviceName: d.deviceName ?? d.name ?? d.device_name ?? d.device,
       productName: d.productName ?? d.product ?? d.product_name,
-      online: d.online ?? d.Online
+      online: d.online ?? d.Online,
     }))
     .filter((d) => d.sn);
 }
@@ -415,7 +550,7 @@ async function loadDevices() {
   const preferred =
     state.config.lastSn && state.devices.some((d) => d.sn === state.config.lastSn)
       ? state.config.lastSn
-      : state.devices[0]?.sn ?? "";
+      : (state.devices[0]?.sn ?? "");
 
   if (preferred) {
     el.deviceSelect.value = preferred;
@@ -444,7 +579,10 @@ async function fetchStatus() {
   const data = json?.data ?? {};
   state.lastStatus = data;
 
-  renderSummaryCards(data, state.devices.find((d) => d.sn === state.selectedSn));
+  renderSummaryCards(
+    data,
+    state.devices.find((d) => d.sn === state.selectedSn),
+  );
   renderKeyValueTable(data, el.filterInput.value);
   renderPowerBreakdown(data);
   renderBatteryDetails(data);
@@ -477,6 +615,9 @@ function bind() {
   el.accessKey.value = state.config.accessKey;
   el.secretKey.value = state.config.secretKey;
   el.refreshMs.value = String(state.config.refreshMs);
+
+  el.graphsRefresh.addEventListener("click", refreshGraphs);
+  el.graphsRange.addEventListener("change", refreshGraphs);
 
   el.saveSettings.addEventListener("click", () => {
     state.config.accessKey = el.accessKey.value.trim();
