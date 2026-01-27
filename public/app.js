@@ -122,6 +122,19 @@ function route() {
 function renderGraphs(rows) {
   if (!window.Chart) return;
 
+  // Ensure consistent ordering on the time axis.
+  const sorted = [...(rows || [])].sort((a, b) => Number(a.ts) - Number(b.ts));
+  const toNum = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const toPoints = (arr, getY) => arr.map((r) => ({ x: Number(r.ts), y: getY(r) }));
+  const avg = (vals) => {
+    const clean = (vals || []).map(toNum).filter((v) => v !== null);
+    if (!clean.length) return null;
+    return clean.reduce((a, b) => a + b, 0) / clean.length;
+  };
+
   for (const k of Object.keys(state.charts)) {
     try {
       state.charts[k]?.destroy();
@@ -129,34 +142,104 @@ function renderGraphs(rows) {
   }
   state.charts = {};
 
-  const labels = rows.map((r) => new Date(r.ts).toLocaleTimeString());
-  const soc = rows.map((r) => r.soc ?? null);
-  const wattsIn = rows.map((r) => r.watts_in ?? null);
-  const wattsOut = rows.map((r) => r.watts_out ?? null);
-  const battV = rows.map((r) => (r.batt_vol_mv ? r.batt_vol_mv / 1000 : null));
-  const battTemp = rows.map((r) => r.batt_temp_c ?? null);
+  const minTs = sorted[0]?.ts;
+  const maxTs = sorted[sorted.length - 1]?.ts;
+  const socPts = toPoints(sorted, (r) => toNum(r.soc));
+  const wattsInPts = toPoints(sorted, (r) => toNum(r.watts_in));
+  const wattsOutPts = toPoints(sorted, (r) => toNum(r.watts_out));
+  const battVPts = toPoints(sorted, (r) => {
+    const mv = toNum(r.batt_vol_mv);
+    return mv === null ? null : mv / 1000;
+  });
+  const battTempPts = toPoints(sorted, (r) => toNum(r.batt_temp_c));
+  const commonOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    normalized: true,
+    interaction: { mode: "nearest", intersect: false },
+    scales: {
+      x: {
+        type: "time",
+        time: {
+          // Let Chart.js choose the best unit; adapter decides formatting.
+          tooltipFormat: "PP HH:mm:ss",
+        },
+        ticks: { maxRotation: 0, autoSkip: true },
+      },
+    },
+    elements: { point: { radius: 0 } },
+  };
 
   state.charts.soc = new Chart(el.chartSoc, {
     type: "line",
-    data: { labels, datasets: [{ label: "SOC %", data: soc }] },
+    data: { datasets: [{ label: "SOC %", data: socPts, spanGaps: false }] },
+    options: {
+      ...commonOptions,
+      scales: {
+        ...commonOptions.scales,
+        y: { suggestedMin: 0, suggestedMax: 100 },
+      },
+    },
   });
   state.charts.power = new Chart(el.chartPower, {
     type: "line",
     data: {
-      labels,
       datasets: [
-        { label: "In W", data: wattsIn },
-        { label: "Out W", data: wattsOut },
+        { label: "In W", data: wattsInPts, spanGaps: false },
+        { label: "Out W", data: wattsOutPts, spanGaps: false },
       ],
     },
+    options: {
+      ...commonOptions,
+      scales: {
+        ...commonOptions.scales,
+        y: { beginAtZero: true },
+      },
+    },
   });
+  // Add dotted average lines (In/Out).
+  if (minTs != null && maxTs != null) {
+    const avgIn = avg(sorted.map((r) => r.watts_in));
+    const avgOut = avg(sorted.map((r) => r.watts_out));
+
+    if (avgIn !== null) {
+      state.charts.power.data.datasets.push({
+        label: `Avg In ${Math.round(avgIn)} W`,
+        data: [
+          { x: Number(minTs), y: avgIn },
+          { x: Number(maxTs), y: avgIn },
+        ],
+        borderDash: [2, 6],
+        pointRadius: 0,
+        borderWidth: 1,
+      });
+    }
+    if (avgOut !== null) {
+      state.charts.power.data.datasets.push({
+        label: `Avg Out ${Math.round(avgOut)} W`,
+        data: [
+          { x: Number(minTs), y: avgOut },
+          { x: Number(maxTs), y: avgOut },
+        ],
+        borderDash: [2, 6],
+        pointRadius: 0,
+        borderWidth: 1,
+      });
+    }
+
+    state.charts.power.update();
+  }
   state.charts.battV = new Chart(el.chartBattV, {
     type: "line",
-    data: { labels, datasets: [{ label: "Battery V", data: battV }] },
+    data: { datasets: [{ label: "Battery V", data: battVPts, spanGaps: false }] },
+    options: commonOptions,
   });
   state.charts.battTemp = new Chart(el.chartBattTemp, {
     type: "line",
-    data: { labels, datasets: [{ label: "Battery °C", data: battTemp }] },
+    data: { datasets: [{ label: "Battery °C", data: battTempPts, spanGaps: false }] },
+    options: commonOptions,
   });
 }
 
