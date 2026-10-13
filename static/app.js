@@ -5,7 +5,7 @@ const num = (v, digits = 0) =>
   v == null ? "—" : Number(v).toLocaleString("en-GB", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
 const STALE_AFTER = 180; // seconds without a reading before the page says so
-const NO_ESTIMATE = 5939; // minutes the station reports when it has no time estimate
+const HOLDING_OVER = 24 * 60; // minutes: an estimate longer than a day means the level is not really moving
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
 
 let hours = 24;
@@ -21,7 +21,6 @@ async function getJson(url) {
 }
 
 function duration(minutes) {
-  if (minutes == null || minutes <= 0 || minutes >= NO_ESTIMATE) return "—";
   const h = Math.floor(minutes / 60);
   return h ? `${h} h ${minutes % 60} min` : `${minutes} min`;
 }
@@ -49,9 +48,11 @@ function showLatest(d) {
 
   const gridOn = d.ac_input_voltage > 50 || d.ac_input_power > 0;
   const net = (d.input_power ?? 0) - (d.output_power ?? 0);
+  const emptying = !gridOn || net < 0;
+  const minutes = emptying ? d.remaining_time_discharging : net > 0 ? d.remaining_time_charging : null;
   let left = ["Time left", "—", "holding level"];
-  if (!gridOn || net < 0) left = ["Until empty", duration(d.remaining_time_discharging), "at this load"];
-  else if (net > 0) left = ["Until full", duration(d.remaining_time_charging), "at this rate"];
+  if (minutes > 0 && minutes <= HOLDING_OVER)
+    left = emptying ? ["Until empty", duration(minutes), "at this load"] : ["Until full", duration(minutes), "at this rate"];
 
   const stats = [
     ["Battery", `${num(d.battery_level, 1)}%`, `limits ${num(d.battery_charge_limit_min)}–${num(d.battery_charge_limit_max)}%`],
