@@ -32,12 +32,20 @@ function ago(seconds) {
   return `${Math.round(seconds / 3600)} h ago`;
 }
 
-function showLatest(d) {
-  last = d;
-  const age = Date.now() / 1000 - d.ts;
-  const at = new Date(d.ts * 1000).toLocaleTimeString("en-GB");
+// runs every second, so the age counts up between readings
+function showAge() {
+  if (!last.ts) return;
+  const age = Math.max(0, Date.now() / 1000 - last.ts);
+  const at = new Date(last.ts * 1000).toLocaleTimeString("en-GB");
   el("updated").classList.toggle("stale", age > STALE_AFTER);
   el("updated").textContent = age > STALE_AFTER ? `No reading since ${at} (${ago(age)})` : `Updated ${at}, ${ago(age)}`;
+}
+
+function showLatest(d) {
+  const fresh = d.ts !== last.ts;
+  last = d;
+  showAge();
+  if (fresh) loadHistory(); // a new reading is a new point on every chart
 
   const gridOn = d.ac_input_voltage > 50 || d.ac_input_power > 0;
   const net = (d.input_power ?? 0) - (d.output_power ?? 0);
@@ -72,12 +80,15 @@ function showAll() {
 async function loadLatest() {
   try {
     const d = await getJson("/api/latest");
-    if (d.ts) return showLatest(d);
-    el("updated").textContent = "No readings yet";
+    if (d.ts) showLatest(d);
+    else el("updated").textContent = "No readings yet";
   } catch {
     el("updated").textContent = "Page server not reachable";
+    el("updated").classList.add("stale");
   }
-  el("updated").classList.add("stale");
+  // readings land once a minute: ask again just after the next one is due, or in 15 s if it is late
+  const due = (last.ts + 63) * 1000 - Date.now();
+  setTimeout(loadLatest, last.ts && due > 0 ? Math.min(due, 60_000) : 15_000);
 }
 
 function draw(id, series, from, to, y = {}) {
@@ -184,6 +195,4 @@ for (const button of document.querySelectorAll("[data-hours]")) {
 }
 el("filter").addEventListener("input", showAll);
 loadLatest();
-loadHistory();
-setInterval(loadLatest, 30_000);
-setInterval(loadHistory, 300_000);
+setInterval(showAge, 1000);

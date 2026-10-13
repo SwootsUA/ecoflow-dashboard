@@ -36,6 +36,23 @@ app.config.update(SESSION_COOKIE_SECURE=True, SESSION_COOKIE_SAMESITE="Lax")
 wrong_passwords: list[float] = []
 
 
+@app.after_request
+def no_store(response):
+    # Cloudflare caches by file extension, .csv included: say plainly that nothing behind the login is cacheable
+    if request.endpoint != "static":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.context_processor
+def asset_urls():
+    # Cloudflare and browsers keep static files for hours; the file time in the URL makes an edit show at once
+    def asset(name: str) -> str:
+        return url_for("static", filename=name, v=int((Path(app.static_folder) / name).stat().st_mtime))
+
+    return {"asset": asset}
+
+
 def check_password(password: str) -> bool:
     """Verify against the pbkdf2_sha256$iterations$salt$hash string shared by the other apps."""
     parts = os.environ.get("PASSWORD_HASH", "").split("$")
@@ -175,7 +192,9 @@ def demo() -> None:
     assert client.get("/").status_code == 302 and client.get("/api/latest").status_code == 401
     assert b"Wrong password" in client.post("/login", data={"password": "wrong"}).data
     assert client.post("/login", data={"password": "right"}).status_code == 302
-    assert client.get("/").status_code == 200
+    page = client.get("/")
+    assert page.status_code == 200 and page.headers["Cache-Control"] == "no-store"
+    assert b"/static/app.js?v=" in page.data
     wrong_passwords.extend([time.monotonic()] * 5)
     assert client.post("/login", data={"password": "right"}).status_code == 429
     wrong_passwords.clear()

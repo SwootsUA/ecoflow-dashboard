@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Swoots EcoFlow</title>
-  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="icon" href="{{ asset('favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
 </head>
 <body>
   <nav>
@@ -50,7 +50,7 @@
     </details>
   </div>
 
-  <script src="{{ url_for('static', filename='chart.umd.min.js') }}"></script>
-  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ asset('chart.umd.min.js') }}"></script>
+  <script src="{{ asset('app.js') }}"></script>
 </body>
 </html>
