@@ -98,7 +98,7 @@ function draw(id, series, from, to, y = {}) {
   charts[id] = new Chart(el(id), {
     type: "line",
     data: {
-      datasets: series.map(([label, color, data]) => ({
+      datasets: series.map(([label, color, data, extra]) => ({
         label,
         data,
         borderColor: color,
@@ -107,6 +107,7 @@ function draw(id, series, from, to, y = {}) {
         pointRadius: 0,
         pointHitRadius: 12,
         spanGaps: false,
+        ...extra,
       })),
     },
     options: {
@@ -181,8 +182,19 @@ async function loadHistory() {
   el("power-note").textContent = `average in ${num(mean(input))}, out ${num(mean(output))}`;
 
   draw("chart-level", [["Battery %", css("--accent"), column("battery_level")]], from, to, { min: 0, max: 100 });
-  // "Out" first so it is drawn on top: on grid the two lines coincide and the load is the one to see
-  draw("chart-power", [["Out", css("--series2"), output], ["In", css("--accent"), input]], from, to, { min: 0 });
+  // While the station only passes grid power through, in and out are one line: that stretch is drawn grey.
+  // Both arrays come from the same rows, so index i is the same moment in each.
+  const grey = css("--fg2");
+  const same = (i) => input[i]?.y != null && output[i]?.y != null && Math.abs(input[i].y - output[i].y) < 1;
+  const passthrough = { segment: { borderColor: (ctx) => (same(ctx.p0DataIndex) && same(ctx.p1DataIndex) ? grey : undefined) } };
+  // the first entry has no points of its own; it is there to put grey in the legend
+  draw(
+    "chart-power",
+    [["In = out", grey, []], ["Out", css("--series2"), output, passthrough], ["In", css("--accent"), input, passthrough]],
+    from,
+    to,
+    { min: 0 },
+  );
   draw("chart-grid", [["Grid V", css("--accent"), column("ac_input_voltage")]], from, to, { min: 0 });
 }
 
