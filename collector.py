@@ -7,11 +7,15 @@ station accepts one Bluetooth connection at a time and the phone app needs the g
 """
 
 import asyncio
+import logging
 import sqlite3
 import time
 from pathlib import Path
 
 from ble_read import read_once
+
+# the library warns on every disconnect, and every read ends with one
+logging.disable(logging.WARNING)
 
 DB = Path("/home/pi/data/ecoflow/ecoflow.db")
 EVERY = 60  # seconds between reads
