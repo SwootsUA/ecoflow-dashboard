@@ -19,6 +19,10 @@ logging.disable(logging.WARNING)
 
 DB = Path("/home/pi/data/ecoflow/ecoflow.db")
 EVERY = 60  # seconds between reads
+# systemd-timesyncd creates this once the clock is set after boot. The Pi has no clock
+# battery and loses power together with the station, so after an outage it boots on a
+# stale clock; rows stamped before the network answers would land in the past.
+CLOCK_SET = Path("/run/systemd/timesync/synchronized")
 
 
 def save(db: sqlite3.Connection, values: dict, ts: int) -> None:
@@ -46,6 +50,8 @@ async def main() -> None:
     while True:
         started = time.monotonic()
         try:
+            if not CLOCK_SET.exists():
+                raise RuntimeError("clock not set since boot")
             save(db, await asyncio.wait_for(read_once(), 45), int(time.time()))
         except Exception as e:  # phone app holds the link, station out of range, Bluetooth hiccup
             print(f"read failed: {type(e).__name__}: {e}", flush=True)
