@@ -15,11 +15,14 @@ sys.path.insert(0, str(HERE / "vendor/ha-ef-ble/custom_components/ef_ble"))
 
 import eflib  # noqa: E402
 from bleak import BleakScanner  # noqa: E402
+from bleak_retry_connector import close_stale_connections_by_address  # noqa: E402
 
 ECOFLOW = 0xB5B5  # manufacturer id in the station's advertisement
 # one value from each module (ems, pd, inverter, bms, mppt): once all five have
 # reported, the read is complete
 CORE = ("battery_level", "input_power", "ac_input_voltage", "cell_temperature", "ac_charging_speed")
+# the station's Bluetooth address, remembered from the last time it was found
+ADDRESS = Path("/home/pi/data/ecoflow/station-address")
 
 
 def user_id() -> str:
@@ -30,7 +33,7 @@ def user_id() -> str:
     raise SystemExit("No ECOFLOW_USER_ID in .env: run get_user_id.py first")
 
 
-async def find_station():
+async def scan():
     seen = {}
 
     def is_station(ble_dev, adv) -> bool:
@@ -41,9 +44,25 @@ async def find_station():
         return True
 
     ble_dev = await BleakScanner.find_device_by_filter(is_station, timeout=10)
-    if ble_dev is None:
+    return eflib.NewDevice(ble_dev, seen["adv"]) if ble_dev else None
+
+
+async def find_station():
+    device = await scan()
+    if device is None and ADDRESS.exists():
+        # A link left open by a process that was killed stays up in BlueZ, and a connected
+        # station stops advertising, so the scan cannot see it. Drop any such link held by
+        # this Pi and look once more. (A phone holding the link is not affected.)
+        await close_stale_connections_by_address(ADDRESS.read_text().strip())
+        device = await scan()
+    if device is None:
         raise RuntimeError("Station not in Bluetooth range")
-    return eflib.NewDevice(ble_dev, seen["adv"])
+    try:
+        if not ADDRESS.exists() or ADDRESS.read_text().strip() != device.address:
+            ADDRESS.write_text(device.address)
+    except OSError:
+        pass  # no data directory (run somewhere else): only the recovery above is lost
+    return device
 
 
 class Station:

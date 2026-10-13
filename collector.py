@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sqlite3
 import tempfile
 import time
@@ -191,6 +192,16 @@ def _demo_sessions(station) -> None:
         assert station.closed == 3
 
 
-if __name__ == "__main__":
+async def main() -> None:
+    # systemd stops the service with SIGTERM. Cancelling instead of dying lets the session
+    # close its link; a link left open would keep the station from being found again.
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     DB.parent.mkdir(parents=True, exist_ok=True)
-    asyncio.run(Collector(open_db(DB)).run())
+    await Collector(open_db(DB)).run()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except asyncio.CancelledError:
+        pass
