@@ -76,7 +76,8 @@ function showLatest(d) {
         `<div class="card"><h2>${label}</h2><div class="stat-value ${tone ?? ""}">${value}</div><div class="stat-sub">${sub}</div></div>`,
     )
     .join("");
-  el("inverter-note").textContent = d.inverter_temperature == null ? "" : `now ${num(d.inverter_temperature)}`;
+  el("inverter-note").textContent =
+    d.inverter_temperature == null ? "" : `now ${num(d.inverter_temperature)}, line estimated between the station's 5° steps`;
   showAll();
 
   if (!fresh) return;
@@ -127,7 +128,10 @@ function addLive(d) {
   view.to = Date.now();
   view.from = view.to - hours * 3600 * 1000;
   for (const chart of Object.values(charts)) {
-    for (const set of chart.data.datasets) if (set.column) set.data.push({ x: d.ts * 1000, y: d[set.column] ?? null });
+    for (const set of chart.data.datasets) {
+      if (set.shape) set.data = set.shape(points(set.column)); // reshaped lines are rebuilt, not appended to
+      else if (set.column) set.data.push({ x: d.ts * 1000, y: d[set.column] ?? null });
+    }
     chart.options.scales.x.min = view.from;
     chart.options.scales.x.max = view.to;
     chart.update("none");
@@ -155,15 +159,47 @@ function points(name) {
   return out;
 }
 
+// The station reports the inverter temperature only in 5-degree bands. The real value crosses
+// a band edge at the moment the reading changes, so the line is drawn through those crossings
+// (halfway between the two readings, in time and in value) instead of as steps.
+function throughCrossings(stepped) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    out.push(run[0]);
+    let edge = null;
+    for (let i = 1; i < run.length; i++) {
+      if (run[i].y === run[i - 1].y) continue;
+      const next = { x: (run[i].x + run[i - 1].x) / 2, y: (run[i].y + run[i - 1].y) / 2 };
+      // it turned around inside one band: show that band's own value in the middle of the stay
+      if (edge && edge.y === next.y) out.push({ x: (edge.x + next.x) / 2, y: run[i - 1].y });
+      out.push(next);
+      edge = next;
+    }
+    if (run.length > 1) out.push(run.at(-1));
+    run = [];
+  };
+  for (const point of stepped) {
+    if (point.y == null) {
+      flush();
+      out.push(point); // a hole in the readings stays a hole
+    } else run.push(point);
+  }
+  flush();
+  return out;
+}
+
 function draw(id, series, y = {}) {
   charts[id]?.destroy();
   charts[id] = new Chart(el(id), {
     type: "line",
     data: {
-      datasets: series.map(({ label, color, column, data, extra }) => ({
+      datasets: series.map(({ label, color, column, data, shape, extra }) => ({
         label,
         column,
-        data: data ?? (column ? points(column) : []),
+        shape,
+        data: data ?? (column ? (shape ? shape(points(column)) : points(column)) : []),
         borderColor: color,
         backgroundColor: color,
         borderWidth: 2,
@@ -229,7 +265,9 @@ async function loadHistory() {
 
   draw("chart-level", [{ label: "Battery %", color: css("--accent"), column: "battery_level" }], { min: 0, max: 100 });
   draw("chart-grid", [{ label: "Grid V", color: css("--accent"), column: "ac_input_voltage" }], { min: 0 });
-  draw("chart-inverter", [{ label: "Inverter °C", color: css("--accent"), column: "inverter_temperature" }]);
+  draw("chart-inverter", [
+    { label: "Inverter °C", color: css("--accent"), column: "inverter_temperature", shape: throughCrossings },
+  ]);
 
   // While the station only passes grid power through, in and out are one line: that stretch is drawn grey.
   // Both lines are built from the same readings, so index i is the same moment in each.
