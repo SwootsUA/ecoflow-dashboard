@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE / "vendor/ha-ef-ble/custom_components/ef_ble"))
 
 import eflib  # noqa: E402
 from bleak import BleakScanner  # noqa: E402
+from eflib import model  # noqa: E402
 from bleak_retry_connector import close_stale_connections_by_address  # noqa: E402
 
 ECOFLOW = 0xB5B5  # manufacturer id in the station's advertisement
@@ -65,6 +66,15 @@ async def find_station():
     return device
 
 
+def unnamed(packets: dict[str, str]) -> dict:
+    """Values the station sends but the library gives no name to, read from the packets."""
+    values = {}
+    if "04-20-02" in packets:  # the inverter's heartbeat
+        inverter = model.DirectInvDeltaHeartbeatPack.from_bytes(bytes.fromhex(packets["04-20-02"]))
+        values["inverter_temperature"] = inverter.out_temp
+    return values
+
+
 class Station:
     """A connected, logged-in station. Nothing is written to it beyond the login."""
 
@@ -100,6 +110,7 @@ class Station:
     def read(self) -> dict:
         """Every value as of now; the library keeps them current while the link is up."""
         values = {f.public_name: getattr(self.device, f.public_name) for f in self.device._fields}
+        values.update(unnamed(self.packets))
         # everything the station said, so values the library has no name for can be decoded later
         values["raw"] = json.dumps(self.packets, sort_keys=True)
         return values

@@ -31,7 +31,7 @@ LIVE = Path(os.environ.get("ECOFLOW_LIVE", "/run/ecoflow-collector/live.json"))
 VIEWER = Path(os.environ.get("ECOFLOW_VIEWER", "/run/ecoflow-page/viewer"))
 LIVE_FRESH = 5  # seconds a published reading counts as live
 PORT = int(os.environ.get("PORT", 8016))
-CHARTED = ("battery_level", "input_power", "output_power", "ac_input_voltage")
+CHARTED = ("battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature")
 POINTS = 720  # most points a chart gets; a longer range is averaged into buckets
 MAX_HOURS = 24 * 366
 

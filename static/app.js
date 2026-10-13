@@ -7,7 +7,7 @@ const num = (v, digits = 0) =>
 const STALE_AFTER = 180; // seconds without a reading before the page says so
 const HOLDING_OVER = 24 * 60; // minutes: an estimate longer than a day means the level is not really moving
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
-const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage"];
+const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
 const FLOOR = 18; // watts: the station reports 0 for anything smaller (the lowest non-zero value it has ever sent)
 
@@ -76,6 +76,7 @@ function showLatest(d) {
         `<div class="card"><h2>${label}</h2><div class="stat-value ${tone ?? ""}">${value}</div><div class="stat-sub">${sub}</div></div>`,
     )
     .join("");
+  el("inverter-note").textContent = d.inverter_temperature == null ? "" : `now ${num(d.inverter_temperature)}`;
   showAll();
 
   if (!fresh) return;
@@ -228,6 +229,7 @@ async function loadHistory() {
 
   draw("chart-level", [{ label: "Battery %", color: css("--accent"), column: "battery_level" }], { min: 0, max: 100 });
   draw("chart-grid", [{ label: "Grid V", color: css("--accent"), column: "ac_input_voltage" }], { min: 0 });
+  draw("chart-inverter", [{ label: "Inverter °C", color: css("--accent"), column: "inverter_temperature" }]);
 
   // While the station only passes grid power through, in and out are one line: that stretch is drawn grey.
   // Both lines are built from the same readings, so index i is the same moment in each.
