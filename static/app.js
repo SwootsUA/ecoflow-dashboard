@@ -9,6 +9,7 @@ const HOLDING_OVER = 24 * 60; // minutes: an estimate longer than a day means th
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
 const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
+const FLOOR = 18; // watts: the station reports 0 for anything smaller (the lowest non-zero value it has ever sent)
 
 let hours = 24;
 let last = {};
@@ -158,10 +159,10 @@ function draw(id, series, y = {}) {
   charts[id] = new Chart(el(id), {
     type: "line",
     data: {
-      datasets: series.map(({ label, color, column, extra }) => ({
+      datasets: series.map(({ label, color, column, data, extra }) => ({
         label,
         column,
-        data: column ? points(column) : [],
+        data: data ?? (column ? points(column) : []),
         borderColor: color,
         backgroundColor: color,
         borderWidth: 2,
@@ -179,6 +180,7 @@ function draw(id, series, y = {}) {
       plugins: {
         legend: { display: series.length > 1, labels: { color: css("--fg"), boxWidth: 12, boxHeight: 2 } },
         tooltip: {
+          filter: (item) => Boolean(item.dataset.column), // readings only, not the marker lines
           callbacks: {
             title: (items) =>
               new Date(items[0].parsed.x).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
@@ -249,6 +251,13 @@ async function loadHistory() {
       { label: "In = out", color: grey }, // no points of its own; it puts grey in the legend
       { label: "Out", color: css("--series2"), column: "output_power", extra: passthrough },
       { label: "In", color: css("--accent"), column: "input_power", extra: passthrough },
+      {
+        // one dashed line across the whole time axis, whatever window is shown
+        label: `reads 0 below ${FLOOR} W`,
+        color: grey,
+        data: [{ x: 0, y: FLOOR }, { x: 4102444800000, y: FLOOR }],
+        extra: { borderDash: [6, 4], borderWidth: 1, pointHitRadius: 0 },
+      },
     ],
     { min: 0 },
   );
