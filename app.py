@@ -106,7 +106,9 @@ def index():
 def latest(db: sqlite3.Connection) -> dict:
     db.row_factory = sqlite3.Row
     row = db.execute("SELECT * FROM readings ORDER BY ts DESC LIMIT 1").fetchone()
-    return dict(row) if row else {}
+    values = dict(row) if row else {}
+    values.pop("raw", None)  # the packet dump belongs in the CSV, not on the page
+    return values
 
 
 def history(db: sqlite3.Connection, hours: float, now: int) -> dict:
@@ -182,7 +184,8 @@ def demo() -> None:
     assert got == {"bucket": 7200, "columns": ["ts", "battery_level", "ac_input_voltage"], "rows": [[7200, 70.0, 0]]}, got
     assert history(db, 1, now=7400)["rows"] == [[7200, 80.0, 220], [7260, 70.0, 0], [7320, 60.0, 221]]
     assert as_csv(db, 1, now=7400).splitlines()[:2] == ["ts,battery_level,ac_input_voltage,note", "7200,80,220,a"]
-    assert latest(db)["note"] == "c"
+    db.execute("ALTER TABLE readings ADD COLUMN raw DEFAULT '{}'")
+    assert latest(db)["note"] == "c" and "raw" not in latest(db)
 
     os.environ["PASSWORD_HASH"] = "pbkdf2_sha256$1000$salt$" + base64.b64encode(
         hashlib.pbkdf2_hmac("sha256", b"right", b"salt", 1000)

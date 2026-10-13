@@ -48,6 +48,14 @@ async def find_station():
 async def read_once(settle: float = 15) -> dict:
     """Connect, let each module report, disconnect. Nothing is written to the station."""
     device = await find_station()
+    # Latest decrypted payload of each packet type, as hex, keyed "source-set-id".
+    # ponytail: extra batteries report on the same type as each other; add the slot byte to the key if one is ever attached
+    packets = {}
+    device.on_packet_parsed(
+        lambda packet: packets.__setitem__(
+            f"{packet.src:02x}-{packet.cmd_set:02x}-{packet.cmd_id:02x}", packet.payload.hex()
+        )
+    )
     await device.with_disabled_reconnect().connect(user_id=user_id())
     try:
         await device.wait_until_authenticated_or_error(raise_on_error=True)
@@ -57,7 +65,10 @@ async def read_once(settle: float = 15) -> dict:
             if all(getattr(device, name) is not None for name in CORE):
                 break
             await asyncio.sleep(0.25)
-        return {f.public_name: getattr(device, f.public_name) for f in device._fields}
+        values = {f.public_name: getattr(device, f.public_name) for f in device._fields}
+        # everything the station said, so values the library has no name for can be decoded later
+        values["raw"] = json.dumps(packets, sort_keys=True)
+        return values
     finally:
         await device.disconnect()
 
