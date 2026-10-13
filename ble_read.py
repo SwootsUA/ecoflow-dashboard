@@ -1,11 +1,12 @@
-"""Read the station once over Bluetooth and print every value as JSON.
+"""The station over Bluetooth: connect, read every value, disconnect.
 
-    ~/venvs/ecoflow/bin/python ble_read.py
+    ~/venvs/ecoflow/bin/python ble_read.py     # one read, printed as JSON
 """
 
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -45,32 +46,59 @@ async def find_station():
     return eflib.NewDevice(ble_dev, seen["adv"])
 
 
-async def read_once(settle: float = 15) -> dict:
-    """Connect, let each module report, disconnect. Nothing is written to the station."""
-    device = await find_station()
-    # Latest decrypted payload of each packet type, as hex, keyed "source-set-id".
-    # ponytail: extra batteries report on the same type as each other; add the slot byte to the key if one is ever attached
-    packets = {}
-    device.on_packet_parsed(
-        lambda packet: packets.__setitem__(
-            f"{packet.src:02x}-{packet.cmd_set:02x}-{packet.cmd_id:02x}", packet.payload.hex()
-        )
-    )
-    await device.with_disabled_reconnect().connect(user_id=user_id())
-    try:
-        await device.wait_until_authenticated_or_error(raise_on_error=True)
-        # A module that is switched off never reports; the library fills its values with
-        # 0 ten seconds after login, so this loop ends either way.
-        for _ in range(int(settle * 4)):
-            if all(getattr(device, name) is not None for name in CORE):
-                break
-            await asyncio.sleep(0.25)
-        values = {f.public_name: getattr(device, f.public_name) for f in device._fields}
+class Station:
+    """A connected, logged-in station. Nothing is written to it beyond the login."""
+
+    def __init__(self, device) -> None:
+        self.device = device
+        # Latest decrypted payload of each packet type, as hex, keyed "source-set-id".
+        # ponytail: extra batteries report on the same type as each other; add the slot byte to the key if one is ever attached
+        self.packets: dict[str, str] = {}
+        self.heard = time.monotonic()
+        device.on_packet_parsed(self._keep)
+
+    def _keep(self, packet) -> None:
+        self.packets[f"{packet.src:02x}-{packet.cmd_set:02x}-{packet.cmd_id:02x}"] = packet.payload.hex()
+        self.heard = time.monotonic()
+
+    @classmethod
+    async def connect(cls, settle: float = 15) -> "Station":
+        station = cls(await find_station())
+        await station.device.with_disabled_reconnect().connect(user_id=user_id())
+        try:
+            await station.device.wait_until_authenticated_or_error(raise_on_error=True)
+            # A module that is switched off never reports; the library fills its values with
+            # 0 ten seconds after login, so this loop ends either way.
+            for _ in range(int(settle * 4)):
+                if all(getattr(station.device, name) is not None for name in CORE):
+                    break
+                await asyncio.sleep(0.25)
+        except BaseException:
+            await station.close()
+            raise
+        return station
+
+    def read(self) -> dict:
+        """Every value as of now; the library keeps them current while the link is up."""
+        values = {f.public_name: getattr(self.device, f.public_name) for f in self.device._fields}
         # everything the station said, so values the library has no name for can be decoded later
-        values["raw"] = json.dumps(packets, sort_keys=True)
+        values["raw"] = json.dumps(self.packets, sort_keys=True)
         return values
+
+    def quiet_for(self) -> float:
+        """Seconds since the station last sent anything."""
+        return time.monotonic() - self.heard
+
+    async def close(self) -> None:
+        await self.device.disconnect()
+
+
+async def read_once() -> dict:
+    station = await Station.connect()
+    try:
+        return station.read()
     finally:
-        await device.disconnect()
+        await station.close()
 
 
 if __name__ == "__main__":

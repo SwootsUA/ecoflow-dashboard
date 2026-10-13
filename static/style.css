@@ -87,6 +87,7 @@ input:focus { outline: none; border-color: var(--accent); }
 /* ── This page ──────────────────────────────────────────────────────────── */
 .updated { color: var(--fg2); font-size: 0.85rem; margin-bottom: 1rem; }
 .updated.stale { color: var(--red); }
+.updated.live { color: var(--green); }
 
 .stats {
   display: grid;

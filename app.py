@@ -11,8 +11,11 @@ import csv
 import hashlib
 import hmac
 import io
+import json
+import logging
 import os
 import sqlite3
+import tempfile
 import time
 from contextlib import closing
 from datetime import timedelta
@@ -21,7 +24,12 @@ from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, session, url_for
 
-DB = Path("/home/pi/data/ecoflow/ecoflow.db")
+DB = Path(os.environ.get("ECOFLOW_DB", "/home/pi/data/ecoflow/ecoflow.db"))
+# Both sit on /run. The collector writes LIVE every second while it holds the Bluetooth
+# link; touching VIEWER is how this process asks it to hold the link.
+LIVE = Path(os.environ.get("ECOFLOW_LIVE", "/run/ecoflow-collector/live.json"))
+VIEWER = Path(os.environ.get("ECOFLOW_VIEWER", "/run/ecoflow-page/viewer"))
+LIVE_FRESH = 5  # seconds a published reading counts as live
 PORT = int(os.environ.get("PORT", 8016))
 CHARTED = ("battery_level", "input_power", "output_power", "ac_input_voltage")
 POINTS = 720  # most points a chart gets; a longer range is averaged into buckets
@@ -31,6 +39,8 @@ app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
 app.permanent_session_lifetime = timedelta(days=3650)
 app.config.update(SESSION_COOKIE_SECURE=True, SESSION_COOKIE_SAMESITE="Lax")
+# one request a second from every open tab would bury the journal
+logging.getLogger("werkzeug").addFilter(lambda record: "/api/live" not in record.getMessage())
 
 # ponytail: one counter for every client; count per CF-Connecting-IP if lockouts ever bite
 wrong_passwords: list[float] = []
@@ -154,10 +164,18 @@ def read(query):
         abort(503, f"Database not readable: {e}")
 
 
-@app.route("/api/latest")
+@app.route("/api/live")
 @require_login
-def api_latest():
-    return jsonify(read(latest))
+def api_live():
+    """What a visible tab asks for every second. Asking is also the signal: the collector
+    holds its Bluetooth link to the station for as long as these requests keep coming."""
+    try:
+        VIEWER.touch()
+        if time.time() - LIVE.stat().st_mtime < LIVE_FRESH:
+            return jsonify(json.loads(LIVE.read_text()) | {"live": True})
+    except (OSError, ValueError):
+        pass  # no collector running, or nothing published yet: the last stored reading will do
+    return jsonify(read(latest) | {"live": False})
 
 
 @app.route("/api/history")
@@ -192,7 +210,7 @@ def demo() -> None:
     ).decode()
     assert check_password("right") and not check_password("wrong")
     client = app.test_client()
-    assert client.get("/").status_code == 302 and client.get("/api/latest").status_code == 401
+    assert client.get("/").status_code == 302 and client.get("/api/live").status_code == 401
     assert b"Wrong password" in client.post("/login", data={"password": "wrong"}).data
     assert client.post("/login", data={"password": "right"}).status_code == 302
     page = client.get("/")
@@ -201,6 +219,23 @@ def demo() -> None:
     wrong_passwords.extend([time.monotonic()] * 5)
     assert client.post("/login", data={"password": "right"}).status_code == 429
     wrong_passwords.clear()
+
+    # live: a fresh published reading is served as live and the request leaves the viewer mark;
+    # a stale one falls back to the last stored row
+    global DB, LIVE, VIEWER
+    real = DB, LIVE, VIEWER
+    with tempfile.TemporaryDirectory() as tmp:
+        DB, LIVE, VIEWER = Path(tmp, "db"), Path(tmp, "live.json"), Path(tmp, "viewer")
+        with closing(sqlite3.connect(DB)) as stored:
+            stored.execute("CREATE TABLE readings (ts INTEGER PRIMARY KEY, battery_level, raw)")
+            stored.execute("INSERT INTO readings VALUES (100, 40, \"{}\")")
+            stored.commit()
+        assert client.get("/api/live").json == {"ts": 100, "battery_level": 40, "live": False} and VIEWER.exists()
+        LIVE.write_text(json.dumps({"ts": 200.5, "battery_level": 41}))
+        assert client.get("/api/live").json == {"ts": 200.5, "battery_level": 41, "live": True}
+        os.utime(LIVE, (time.time() - 60, time.time() - 60))
+        assert client.get("/api/live").json["live"] is False
+    DB, LIVE, VIEWER = real
 
 
 if __name__ == "__main__":

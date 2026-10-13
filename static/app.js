@@ -7,10 +7,15 @@ const num = (v, digits = 0) =>
 const STALE_AFTER = 180; // seconds without a reading before the page says so
 const HOLDING_OVER = 24 * 60; // minutes: an estimate longer than a day means the level is not really moving
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
+const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage"];
+const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
 
 let hours = 24;
 let last = {};
+let stored = null; // the last /api/history answer
+const tail = []; // live readings received since the page opened, oldest first
 const charts = {};
+const view = { from: 0, to: 0 }; // the time window every chart shows, in ms
 
 // the session ended (or was never there): back to the login page
 async function getJson(url) {
@@ -36,15 +41,19 @@ function showAge() {
   if (!last.ts) return;
   const age = Math.max(0, Date.now() / 1000 - last.ts);
   const at = new Date(last.ts * 1000).toLocaleTimeString("en-GB");
-  el("updated").classList.toggle("stale", age > STALE_AFTER);
-  el("updated").textContent = age > STALE_AFTER ? `No reading since ${at} (${ago(age)})` : `Updated ${at}, ${ago(age)}`;
+  const stale = age > STALE_AFTER;
+  const live = Boolean(last.live) && age < 5; // "live" only while readings are actually arriving
+  el("updated").classList.toggle("stale", stale);
+  el("updated").classList.toggle("live", live);
+  if (stale) el("updated").textContent = `No reading since ${at} (${ago(age)})`;
+  else el("updated").textContent = live ? `Live, ${at}` : `Updated ${at}, ${ago(age)}`;
 }
 
 function showLatest(d) {
+  const first = !last.ts;
   const fresh = d.ts !== last.ts;
   last = d;
   showAge();
-  if (fresh) loadHistory(); // a new reading is a new point on every chart
 
   const gridOn = d.ac_input_voltage > 50 || d.ac_input_power > 0;
   const net = (d.input_power ?? 0) - (d.output_power ?? 0);
@@ -67,9 +76,14 @@ function showLatest(d) {
     )
     .join("");
   showAll();
+
+  if (!fresh) return;
+  if (d.live) addLive(d);
+  else if (!first) loadHistory(); // a new stored reading is a new point on every chart
 }
 
 function showAll() {
+  if (!el("all").closest("details").open) return;
   const want = el("filter").value.trim().toLowerCase();
   el("all").innerHTML = Object.keys(last)
     .sort()
@@ -78,29 +92,76 @@ function showAll() {
     .join("");
 }
 
-async function loadLatest() {
+// A visible tab asks once a second. Asking is also the signal: the Pi holds its Bluetooth
+// link to the station only while these requests keep coming, so a hidden tab stops asking.
+let asking = false;
+let nextAsk = null;
+
+async function ask() {
+  if (asking || document.hidden) return;
+  asking = true;
   try {
-    const d = await getJson("/api/latest");
+    const d = await getJson("/api/live");
     if (d.ts) showLatest(d);
     else el("updated").textContent = "No readings yet";
   } catch {
     el("updated").textContent = "Page server not reachable";
     el("updated").classList.add("stale");
   }
-  // readings land once a minute: ask again just after the next one is due, or in 15 s if it is late
-  const due = (last.ts + 63) * 1000 - Date.now();
-  setTimeout(loadLatest, last.ts && due > 0 ? Math.min(due, 60_000) : 15_000);
+  asking = false;
+  clearTimeout(nextAsk);
+  nextAsk = setTimeout(ask, 1000);
 }
 
-function draw(id, series, from, to, y = {}) {
-  const step = STEP[hours] * 1000;
+// One live reading: remember it, and move the right edge of every chart without redrawing them.
+function addLive(d) {
+  // back after a pause (the tab was hidden): the old live stretch would hide the readings stored since
+  const resumed = tail.length && d.ts - tail.at(-1).ts > 120;
+  if (resumed) tail.length = 0;
+  tail.push(Object.fromEntries(["ts", ...CHARTED].map((name) => [name, d[name] ?? null])));
+  if (tail.length > TAIL_MAX) tail.shift();
+  if (resumed) return loadHistory();
+  if (!stored) return;
+  view.to = Date.now();
+  view.from = view.to - hours * 3600 * 1000;
+  for (const chart of Object.values(charts)) {
+    for (const set of chart.data.datasets) if (set.column) set.data.push({ x: d.ts * 1000, y: d[set.column] ?? null });
+    chart.options.scales.x.min = view.from;
+    chart.options.scales.x.max = view.to;
+    chart.update("none");
+  }
+}
+
+// The points of one value: stored readings, with the live stretch (one a second) in place of
+// the stored ones it overlaps. A hole in the readings stays a hole in the line.
+function points(name) {
+  const column = stored.columns.indexOf(name);
+  const step = Math.max(stored.bucket, 60);
+  const liveFrom = tail[0]?.ts ?? Infinity;
+  const liveTo = tail.at(-1)?.ts ?? -Infinity;
+  const out = [];
+  let before = null;
+  const add = (ts, y) => {
+    if (before != null && ts - before > 2.5 * step) out.push({ x: before * 1000 + 1, y: null });
+    out.push({ x: ts * 1000, y });
+    before = ts;
+  };
+  for (const row of stored.rows) if (row[0] < liveFrom) add(row[0], column < 0 ? null : row[column]);
+  for (const reading of tail) add(reading.ts, reading[name]);
+  // only with a live stretch: without one, every stored row is already in
+  if (tail.length) for (const row of stored.rows) if (row[0] > liveTo) add(row[0], column < 0 ? null : row[column]);
+  return out;
+}
+
+function draw(id, series, y = {}) {
   charts[id]?.destroy();
   charts[id] = new Chart(el(id), {
     type: "line",
     data: {
-      datasets: series.map(([label, color, data, extra]) => ({
+      datasets: series.map(({ label, color, column, extra }) => ({
         label,
-        data,
+        column,
+        data: column ? points(column) : [],
         borderColor: color,
         backgroundColor: color,
         borderWidth: 2,
@@ -120,15 +181,15 @@ function draw(id, series, from, to, y = {}) {
         tooltip: {
           callbacks: {
             title: (items) =>
-              new Date(items[0].parsed.x).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }),
+              new Date(items[0].parsed.x).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
           },
         },
       },
       scales: {
         x: {
           type: "linear",
-          min: from,
-          max: to,
+          min: view.from,
+          max: view.to,
           grid: { color: css("--bg3") },
           ticks: {
             color: css("--fg2"),
@@ -140,62 +201,62 @@ function draw(id, series, from, to, y = {}) {
           },
           // ticks on round local times (every 6 hours, every midnight) instead of offsets from "now"
           afterBuildTicks: (axis) => {
-            const midnight = new Date(from).setHours(0, 0, 0, 0);
+            const step = STEP[hours] * 1000;
+            const midnight = new Date(view.from).setHours(0, 0, 0, 0);
             axis.ticks = [];
-            for (let t = midnight; t <= to; t += step) if (t >= from) axis.ticks.push({ value: t });
+            for (let t = midnight; t <= view.to; t += step) if (t >= view.from) axis.ticks.push({ value: t });
           },
         },
         y: { ticks: { color: css("--fg2") }, grid: { color: css("--bg3") }, ...y },
       },
     },
   });
+  return charts[id];
 }
 
 async function loadHistory() {
   el("csv").href = `/api/readings.csv?hours=${hours}`;
-  let h;
   try {
-    h = await getJson(`/api/history?hours=${hours}`);
+    stored = await getJson(`/api/history?hours=${hours}`);
   } catch {
     return;
   }
-  const column = (name) => {
-    const i = h.columns.indexOf(name);
-    const points = [];
-    let before = null;
-    for (const row of h.rows) {
-      // a hole in the readings stays a hole in the line
-      if (before != null && row[0] - before > 2.5 * h.bucket) points.push({ x: (before + h.bucket) * 1000, y: null });
-      points.push({ x: row[0] * 1000, y: i < 0 ? null : row[i] });
-      before = row[0];
-    }
-    return points;
-  };
-  const mean = (points) => {
-    const ys = points.map((p) => p.y).filter((y) => y != null);
-    return ys.length ? Math.round(ys.reduce((a, b) => a + b, 0) / ys.length) : null;
-  };
-  const to = Date.now();
-  const from = to - hours * 3600 * 1000;
-  const input = column("input_power");
-  const output = column("output_power");
-  el("power-note").textContent = `average in ${num(mean(input))}, out ${num(mean(output))}`;
+  view.to = Date.now();
+  view.from = view.to - hours * 3600 * 1000;
 
-  draw("chart-level", [["Battery %", css("--accent"), column("battery_level")]], from, to, { min: 0, max: 100 });
+  draw("chart-level", [{ label: "Battery %", color: css("--accent"), column: "battery_level" }], { min: 0, max: 100 });
+  draw("chart-grid", [{ label: "Grid V", color: css("--accent"), column: "ac_input_voltage" }], { min: 0 });
+
   // While the station only passes grid power through, in and out are one line: that stretch is drawn grey.
-  // Both arrays come from the same rows, so index i is the same moment in each.
+  // Both lines are built from the same readings, so index i is the same moment in each.
   const grey = css("--fg2");
-  const same = (i) => input[i]?.y != null && output[i]?.y != null && Math.abs(input[i].y - output[i].y) < 1;
-  const passthrough = { segment: { borderColor: (ctx) => (same(ctx.p0DataIndex) && same(ctx.p1DataIndex) ? grey : undefined) } };
-  // the first entry has no points of its own; it is there to put grey in the legend
-  draw(
+  const same = (sets, i) => {
+    const out = sets[1].data[i]?.y;
+    const input = sets[2].data[i]?.y;
+    return out != null && input != null && Math.abs(out - input) < 1;
+  };
+  const passthrough = {
+    segment: {
+      borderColor: (ctx) => {
+        const sets = ctx.chart.data.datasets;
+        return same(sets, ctx.p0DataIndex) && same(sets, ctx.p1DataIndex) ? grey : undefined;
+      },
+    },
+  };
+  const power = draw(
     "chart-power",
-    [["In = out", grey, []], ["Out", css("--series2"), output, passthrough], ["In", css("--accent"), input, passthrough]],
-    from,
-    to,
+    [
+      { label: "In = out", color: grey }, // no points of its own; it puts grey in the legend
+      { label: "Out", color: css("--series2"), column: "output_power", extra: passthrough },
+      { label: "In", color: css("--accent"), column: "input_power", extra: passthrough },
+    ],
     { min: 0 },
   );
-  draw("chart-grid", [["Grid V", css("--accent"), column("ac_input_voltage")]], from, to, { min: 0 });
+  const mean = (set) => {
+    const ys = set.data.map((p) => p.y).filter((y) => y != null);
+    return ys.length ? Math.round(ys.reduce((a, b) => a + b, 0) / ys.length) : null;
+  };
+  el("power-note").textContent = `average in ${num(mean(power.data.datasets[2]))}, out ${num(mean(power.data.datasets[1]))}`;
 }
 
 for (const button of document.querySelectorAll("[data-hours]")) {
@@ -207,5 +268,11 @@ for (const button of document.querySelectorAll("[data-hours]")) {
   });
 }
 el("filter").addEventListener("input", showAll);
-loadLatest();
+el("all").closest("details").addEventListener("toggle", showAll);
+document.addEventListener("visibilitychange", ask);
+
+loadHistory();
+ask();
 setInterval(showAge, 1000);
+// live points pile up in the charts; rebuilding now and then keeps them to stored readings plus the last half hour
+setInterval(() => last.live && !document.hidden && loadHistory(), 300_000);
