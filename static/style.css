@@ -1,0 +1,127 @@
+/* Aligned to the show-tracker / admin design system: shared palette, nav,
+   container, card and btn primitives, so the page reads as part of the fleet. */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0f0f0f;
+  --bg2: #1a1a1a;
+  --bg3: #252525;
+  --fg: #e0e0e0;
+  --fg2: #888;
+  --accent: #7c6ff7;
+  --accent2: #5a4fd4;
+  --series2: #d95926; /* second chart line; checked against --accent for colour-blind contrast */
+  --red: #e05555;
+  --green: #55c077;
+  --radius: 8px;
+}
+
+body {
+  font-family: -apple-system, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  min-height: 100vh;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+nav {
+  background: var(--bg2);
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--bg3);
+}
+nav .brand { font-size: 1.2rem; font-weight: 700; color: var(--fg); }
+nav .brand:hover { text-decoration: none; }
+nav .nav-links { display: flex; gap: 1rem; align-items: center; }
+
+.container { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--bg3);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+.card h2 {
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--fg2); margin-bottom: 0.75rem;
+}
+.card h2 span { text-transform: none; letter-spacing: 0; margin-left: 0.5rem; }
+
+.btn {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--bg3);
+  border-radius: var(--radius);
+  background: var(--bg3);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-family: inherit;
+  text-decoration: none;
+}
+.btn:hover { border-color: var(--accent); text-decoration: none; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent2); border-color: var(--accent2); }
+.btn-ghost { background: transparent; }
+.btn-sm { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+.btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+input[type="text"],
+input[type="password"] {
+  background: var(--bg3); color: var(--fg);
+  border: 1px solid #333; border-radius: var(--radius);
+  padding: 0.5rem 0.75rem; font-size: 0.95rem;
+}
+input:focus { outline: none; border-color: var(--accent); }
+
+.row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+.error { color: var(--red); margin: 0 0 0.75rem; font-size: 0.85rem; }
+
+/* ── This page ──────────────────────────────────────────────────────────── */
+.updated { color: var(--fg2); font-size: 0.85rem; margin-bottom: 1rem; }
+.updated.stale { color: var(--red); }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.stats .card { margin-bottom: 0; }
+.stat-value { font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat-value.off { color: var(--red); }
+.stat-sub { color: var(--fg2); font-size: 0.85rem; margin-top: 0.25rem; }
+
+.range { margin-bottom: 1rem; }
+.chart { position: relative; height: 220px; }
+
+summary { cursor: pointer; font-size: 0.9rem; }
+details input { margin-top: 0.75rem; width: 100%; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.75rem; }
+td { padding: 0.35rem 0.25rem; border-top: 1px solid var(--bg3); font-variant-numeric: tabular-nums; }
+td:first-child { color: var(--fg2); }
+td:last-child { text-align: right; }
+
+/* ── Login ──────────────────────────────────────────────────────────────── */
+body.login { display: grid; place-items: center; min-height: 100vh; }
+.login-card { width: 280px; text-align: center; padding: 1.5rem; }
+.login-card h1 { font-size: 1.2rem; margin-bottom: 0.75rem; }
+.login-card input { width: 100%; padding: 0.6rem; margin: 0.5rem 0; }
+.login-card .btn { width: 100%; }
+
+/* four tiles in a row, or two by two: never three and an orphan */
+@media (max-width: 720px) {
+  .stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 480px) {
+  nav { padding: 1rem; }
+  .container { margin: 1rem auto; }
+}

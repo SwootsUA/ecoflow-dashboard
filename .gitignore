@@ -4,3 +4,4 @@ node_modules/
 *.bak.*
 logs/*
 __pycache__/
+.env.web

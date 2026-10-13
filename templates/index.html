@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swoots EcoFlow</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <nav>
+    <a href="/" class="brand">🔋 ecoflow</a>
+    <div class="nav-links">
+      <a href="https://admin.swoots.dev">Admin</a>
+      <a href="{{ url_for('logout') }}">Logout</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <p id="updated" class="updated">Loading…</p>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="row range">
+      <button class="btn btn-sm" data-hours="1">1h</button>
+      <button class="btn btn-sm" data-hours="6">6h</button>
+      <button class="btn btn-sm active" data-hours="24">24h</button>
+      <button class="btn btn-sm" data-hours="168">7d</button>
+      <button class="btn btn-sm" data-hours="720">30d</button>
+      <a class="btn btn-sm btn-ghost" id="csv" href="/api/readings.csv?hours=24">CSV</a>
+    </div>
+
+    <div class="card">
+      <h2>Battery, %</h2>
+      <div class="chart"><canvas id="chart-level"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Power, W <span id="power-note"></span></h2>
+      <div class="chart"><canvas id="chart-power"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Grid, V <span>0 = outage</span></h2>
+      <div class="chart"><canvas id="chart-grid"></canvas></div>
+    </div>
+
+    <details class="card">
+      <summary>All values</summary>
+      <input id="filter" type="text" placeholder="Filter, e.g. usb" aria-label="Filter values">
+      <table><tbody id="all"></tbody></table>
+    </details>
+  </div>
+
+  <script src="{{ url_for('static', filename='chart.umd.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
