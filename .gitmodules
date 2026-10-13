@@ -1,0 +1,4 @@
+[submodule "vendor/ha-ef-ble"]
+	path = vendor/ha-ef-ble
+	url = https://github.com/rabits/ha-ef-ble.git
+	ignore = untracked
