@@ -6,6 +6,7 @@ const num = (v, digits = 0) =>
 
 const STALE_AFTER = 180; // seconds without a reading before the page says so
 const HOLDING_OVER = 24 * 60; // minutes: an estimate longer than a day means the level is not really moving
+const NO_ESTIMATE = 5939; // minutes the station reports when it has no estimate at all
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
 const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
@@ -60,9 +61,13 @@ function showLatest(d) {
   const net = (d.input_power ?? 0) - (d.output_power ?? 0);
   const emptying = !gridOn || net < 0;
   const minutes = emptying ? d.remaining_time_discharging : net > 0 ? d.remaining_time_charging : null;
+  // The station counts down to 0%, but it stops at its discharge limit: only the part above that is time left.
+  const floor = d.battery_charge_limit_min ?? 0;
+  const toFloor = Math.round((minutes * Math.max(0, d.battery_level - floor)) / d.battery_level);
   let left = ["Time left", "—", "holding level"];
-  if (minutes > 0 && minutes <= HOLDING_OVER)
-    left = emptying ? ["Until empty", duration(minutes), "at this load"] : ["Until full", duration(minutes), "at this rate"];
+  // a day-long estimate on the grid means the level isn't moving; off the grid it is real (PC off lasts ~25 h)
+  if (minutes > 0 && minutes < NO_ESTIMATE && (minutes <= HOLDING_OVER || !gridOn))
+    left = emptying ? [`Until ${num(floor)}%`, duration(toFloor), "at this load"] : ["Until full", duration(minutes), "at this rate"];
 
   const stats = [
     ["Battery", `${num(d.battery_level, 1)}%`, `limits ${num(d.battery_charge_limit_min)}–${num(d.battery_charge_limit_max)}%`],
@@ -78,11 +83,52 @@ function showLatest(d) {
     .join("");
   el("inverter-note").textContent =
     d.inverter_temperature == null ? "" : `now ${num(d.inverter_temperature)}, line estimated between the station's 5° steps`;
+  showOutage();
   showAll();
 
   if (!fresh) return;
   if (d.live) addLive(d);
   else if (!first) loadHistory(); // a new stored reading is a new point on every chart
+}
+
+// The next possible outage for the queue (outages.py reads the oblenergo's daily posts) and how long
+// the battery would last through it. A posted slot can still be skipped, so it says "possible".
+let outages = {};
+
+async function loadOutages() {
+  try {
+    outages = await getJson("/api/outages");
+  } catch {
+    return;
+  }
+  showOutage();
+}
+
+function showOutage() {
+  if (!outages.days) return;
+  const now = Date.now();
+  const at = (day, hhmm) => new Date(`${day}T00:00`).setHours(...hhmm.split(":").map(Number)); // "24:00" rolls to the next day
+  const hm = (ms) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const slots = Object.entries(outages.days)
+    .flatMap(([day, d]) => d.windows.map(([a, b]) => [at(day, a), at(day, b)]))
+    .filter(([, end]) => end > now)
+    .sort((x, y) => x[0] - y[0]);
+  let text = `No possible outages left in the posted schedule for queue ${outages.queue}`;
+  if (slots.length) {
+    const [start, end] = slots[0];
+    const day = new Date(start).toDateString() === new Date(now).toDateString() ? "today" : new Date(start).toLocaleDateString("en-GB", { weekday: "long" });
+    text =
+      start <= now
+        ? `Possible outage now, until ${hm(end)} (queue ${outages.queue})`
+        : `Next possible outage ${day} ${hm(start)}–${hm(end)}, in ${duration(Math.round((start - now) / 60000))} (queue ${outages.queue})`;
+    if (last.battery_level != null) {
+      const above = Math.max(0, last.battery_level - (last.battery_charge_limit_min ?? 0));
+      const lasts = (name) => duration(Math.round((above / outages.drain[name]) * 60));
+      text += `. The battery lasts ${lasts("PC on")} with the PC on, ${lasts("PC off")} with it off`;
+    }
+  }
+  const checked = (now - new Date(outages.checked)) / 1000;
+  el("outage").textContent = text + (checked > 3600 ? `. Schedule last checked ${ago(checked)}` : "");
 }
 
 function showAll() {
@@ -325,3 +371,5 @@ ask();
 setInterval(showAge, 1000);
 // live points pile up in the charts; rebuilding now and then keeps them to stored readings plus the last half hour
 setInterval(() => last.live && !document.hidden && loadHistory(), 300_000);
+loadOutages();
+setInterval(loadOutages, 300_000);

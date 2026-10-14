@@ -3,3 +3,4 @@
 *.bak.*
 __pycache__/
 .env.web
+.env.notify

@@ -30,6 +30,7 @@ DB = Path(os.environ.get("ECOFLOW_DB", "/home/pi/data/ecoflow/ecoflow.db"))
 LIVE = Path(os.environ.get("ECOFLOW_LIVE", "/run/ecoflow-collector/live.json"))
 VIEWER = Path(os.environ.get("ECOFLOW_VIEWER", "/run/ecoflow-page/viewer"))
 LIVE_FRESH = 5  # seconds a published reading counts as live
+OUTAGES = Path(os.environ.get("ECOFLOW_OUTAGES", "/home/pi/data/ecoflow/outages.json"))  # written by outages.py
 PORT = int(os.environ.get("PORT", 8016))
 CHARTED = ("battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature")
 POINTS = 720  # most points a chart gets; a longer range is averaged into buckets
@@ -185,6 +186,16 @@ def api_history():
     return jsonify(read(lambda db: history(db, hours, int(time.time()))))
 
 
+@app.route("/api/outages")
+@require_login
+def api_outages():
+    """The queue's possible outage windows and the battery drain rates, as outages.py last wrote them."""
+    try:
+        return jsonify(json.loads(OUTAGES.read_text()))
+    except (OSError, ValueError):
+        return jsonify({})
+
+
 @app.route("/api/readings.csv")
 @require_login
 def api_csv():
@@ -222,10 +233,13 @@ def demo() -> None:
 
     # live: a fresh published reading is served as live and the request leaves the viewer mark;
     # a stale one falls back to the last stored row
-    global DB, LIVE, VIEWER
-    real = DB, LIVE, VIEWER
+    global DB, LIVE, VIEWER, OUTAGES
+    real = DB, LIVE, VIEWER, OUTAGES
     with tempfile.TemporaryDirectory() as tmp:
-        DB, LIVE, VIEWER = Path(tmp, "db"), Path(tmp, "live.json"), Path(tmp, "viewer")
+        DB, LIVE, VIEWER, OUTAGES = Path(tmp, "db"), Path(tmp, "live.json"), Path(tmp, "viewer"), Path(tmp, "outages.json")
+        assert client.get("/api/outages").json == {}  # outages.py hasn't run yet
+        OUTAGES.write_text(json.dumps({"queue": "2.1", "days": {}}))
+        assert client.get("/api/outages").json == {"queue": "2.1", "days": {}}
         with closing(sqlite3.connect(DB)) as stored:
             stored.execute("CREATE TABLE readings (ts INTEGER PRIMARY KEY, battery_level, raw)")
             stored.execute("INSERT INTO readings VALUES (100, 40, \"{}\")")
@@ -235,7 +249,7 @@ def demo() -> None:
         assert client.get("/api/live").json == {"ts": 200.5, "battery_level": 41, "live": True}
         os.utime(LIVE, (time.time() - 60, time.time() - 60))
         assert client.get("/api/live").json["live"] is False
-    DB, LIVE, VIEWER = real
+    DB, LIVE, VIEWER, OUTAGES = real
 
 
 if __name__ == "__main__":
