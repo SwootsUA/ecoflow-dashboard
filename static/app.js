@@ -10,6 +10,10 @@ const NO_ESTIMATE = 5939; // minutes the station reports when it has no estimate
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
 const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
+const AHEAD = 2; // hours of forecast right of now (the 1 h view gets 1)
+// %/h the battery gained on the grid after the 14 Oct outage (694 W in at 34%)
+// ponytail: one measurement; it likely slows near the top, re-measure after a few more outages
+const CHARGE = 43;
 const FLOOR = 18; // watts: the station reports 0 for anything smaller (the lowest non-zero value it has ever sent)
 
 let hours = 24;
@@ -83,17 +87,17 @@ function showLatest(d) {
     .join("");
   el("inverter-note").textContent =
     d.inverter_temperature == null ? "" : `now ${num(d.inverter_temperature)}, line estimated between the station's 5° steps`;
-  showOutage();
   showAll();
 
-  if (!fresh) return;
-  if (d.live) addLive(d);
-  else if (!first) loadHistory(); // a new stored reading is a new point on every chart
+  if (fresh && d.live) addLive(d);
+  else if (fresh && !first) loadHistory(); // a new stored reading is a new point on every chart
+  moveRight();
 }
 
-// The next possible outage for the queue (outages.py reads the oblenergo's daily posts) and how long
-// the battery would last through it. A posted slot can still be skipped, so it says "possible".
+// Possible outages for the queue, from outages.py (it reads the oblenergo's daily posts). A posted slot
+// can still be skipped, so the charts show them as "possible": hatched bands, with a forecast through them.
 let outages = {};
+let slots = []; // [start ms, end ms] of each posted slot, soonest first
 
 async function loadOutages() {
   try {
@@ -101,35 +105,116 @@ async function loadOutages() {
   } catch {
     return;
   }
-  showOutage();
+  const at = (day, hhmm) => new Date(`${day}T00:00`).setHours(...hhmm.split(":").map(Number)); // "24:00" rolls to the next day
+  slots = Object.entries(outages.days ?? {})
+    .flatMap(([day, d]) => d.windows.map(([a, b]) => [at(day, a), at(day, b)]))
+    .sort((x, y) => x[0] - y[0]);
+  moveRight();
 }
 
 function showOutage() {
-  if (!outages.days) return;
   const now = Date.now();
-  const at = (day, hhmm) => new Date(`${day}T00:00`).setHours(...hhmm.split(":").map(Number)); // "24:00" rolls to the next day
+  const next = slots.find(([, end]) => end > now);
   const hm = (ms) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const slots = Object.entries(outages.days)
-    .flatMap(([day, d]) => d.windows.map(([a, b]) => [at(day, a), at(day, b)]))
-    .filter(([, end]) => end > now)
-    .sort((x, y) => x[0] - y[0]);
-  let text = `No possible outages left in the posted schedule for queue ${outages.queue}`;
-  if (slots.length) {
-    const [start, end] = slots[0];
-    const day = new Date(start).toDateString() === new Date(now).toDateString() ? "today" : new Date(start).toLocaleDateString("en-GB", { weekday: "long" });
-    text =
-      start <= now
-        ? `Possible outage now, until ${hm(end)} (queue ${outages.queue})`
-        : `Next possible outage ${day} ${hm(start)}–${hm(end)}, in ${duration(Math.round((start - now) / 60000))} (queue ${outages.queue})`;
-    if (last.battery_level != null) {
-      const above = Math.max(0, last.battery_level - (last.battery_charge_limit_min ?? 0));
-      const lasts = (name) => duration(Math.round((above / outages.drain[name]) * 60));
-      text += `. The battery lasts ${lasts("PC on")} with the PC on, ${lasts("PC off")} with it off`;
-    }
-  }
+  const day = (ms) => (new Date(ms).toDateString() === new Date(now).toDateString() ? "today" : new Date(ms).toLocaleDateString("en-GB", { weekday: "long" }));
+  let text = "";
+  if (next) text = next[0] <= now ? `possible outage now, until ${hm(next[1])}` : `next possible outage ${day(next[0])} ${hm(next[0])}–${hm(next[1])}`;
+  if (outages.queue) text += `${text ? ", " : ""}queue ${outages.queue}`;
   const checked = (now - new Date(outages.checked)) / 1000;
-  el("outage").textContent = text + (checked > 3600 ? `. Schedule last checked ${ago(checked)}` : "");
+  if (checked > 3600) text += `, schedule checked ${ago(checked)}`;
+  el("battery-note").textContent = text;
 }
+
+// The battery from the newest reading to the right edge. On the grid it holds, or charges (after an
+// outage, or when it already is); through a possible outage it drains at the rate measured for that
+// load, down to the discharge limit where the station cuts out.
+function predict(load) {
+  const d = last;
+  if (d.battery_level == null || !outages.drain) return [];
+  const floor = d.battery_charge_limit_min ?? 0;
+  const top = d.battery_charge_limit_max ?? 100;
+  let t = d.ts * 1000;
+  // off the grid now: assume it stays off to the end of the slot it falls in, or to the edge if none
+  const offUntil = d.ac_input_voltage > 50 || d.ac_input_power > 0 ? 0 : (slots.find(([s, e]) => s <= t && t < e)?.[1] ?? Infinity);
+  let charging = (d.input_power ?? 0) - (d.output_power ?? 0) > 50;
+  let level = d.battery_level;
+  const out = [{ x: t, y: level }];
+  while (t < view.to) {
+    const next = Math.min(t + 300e3, view.to, ...slots.flat().filter((edge) => edge > t)); // steps break at slot edges
+    const span = (next - t) / 3600e3;
+    if (t < offUntil || slots.some(([s, e]) => s <= t && t < e)) {
+      level = Math.max(floor, level - outages.drain[load] * span);
+      charging = true; // the grid's return starts a recharge
+    } else if (charging) {
+      level = Math.min(top, level + CHARGE * span);
+      charging = level < top;
+    }
+    t = next;
+    out.push({ x: t, y: level });
+  }
+  return out;
+}
+
+// The right edge: AHEAD hours from now, stretched to show a possible outage that starts inside that
+// whole, plus an hour of the recharge after it.
+function aheadTo(now) {
+  let to = now + Math.min(AHEAD, hours) * 3600e3;
+  const next = slots.find(([, end]) => end > now);
+  if (next && next[0] < to) to = Math.max(to, next[1] + 3600e3);
+  return to;
+}
+
+// Every second: slide the window, rebuild the forecast from the newest reading, redraw in place.
+function moveRight() {
+  const now = Date.now();
+  view.to = aheadTo(now);
+  view.from = now - hours * 3600e3;
+  for (const chart of Object.values(charts)) {
+    for (const set of chart.data.datasets) if (set.forecast) set.data = predict(set.forecast);
+    chart.options.scales.x.min = view.from;
+    chart.options.scales.x.max = view.to;
+    chart.update("none");
+  }
+  showOutage();
+}
+
+// Hatched bands for the posted slots and a dotted line at now, behind every chart's lines.
+Chart.register({
+  id: "outageBands",
+  beforeDatasetsDraw(chart) {
+    const { ctx, chartArea: area, scales } = chart;
+    const x = scales.x;
+    if (!chart.$hatch) {
+      const tile = document.createElement("canvas");
+      tile.width = tile.height = 8;
+      const pen = tile.getContext("2d");
+      pen.strokeStyle = css("--red");
+      pen.globalAlpha = 0.5;
+      pen.beginPath();
+      pen.moveTo(0, 8);
+      pen.lineTo(8, 0);
+      pen.stroke();
+      chart.$hatch = ctx.createPattern(tile, "repeat");
+    }
+    ctx.save();
+    ctx.fillStyle = chart.$hatch;
+    for (const [start, end] of slots) {
+      const left = Math.max(x.getPixelForValue(start), area.left);
+      const right = Math.min(x.getPixelForValue(end), area.right);
+      if (right > left) ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
+    }
+    const now = x.getPixelForValue(Date.now());
+    if (now > area.left && now < area.right) {
+      ctx.strokeStyle = css("--fg2");
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(now, area.top);
+      ctx.lineTo(now, area.bottom);
+      ctx.stroke();
+    }
+    ctx.restore();
+  },
+});
 
 function showAll() {
   if (!el("all").closest("details").open) return;
@@ -162,7 +247,7 @@ async function ask() {
   nextAsk = setTimeout(ask, 1000);
 }
 
-// One live reading: remember it, and move the right edge of every chart without redrawing them.
+// One live reading: remember it and add it to every chart (moveRight redraws them).
 function addLive(d) {
   // back after a pause (the tab was hidden): the old live stretch would hide the readings stored since
   const resumed = tail.length && d.ts - tail.at(-1).ts > 120;
@@ -171,17 +256,11 @@ function addLive(d) {
   if (tail.length > TAIL_MAX) tail.shift();
   if (resumed) return loadHistory();
   if (!stored) return;
-  view.to = Date.now();
-  view.from = view.to - hours * 3600 * 1000;
-  for (const chart of Object.values(charts)) {
+  for (const chart of Object.values(charts))
     for (const set of chart.data.datasets) {
       if (set.shape) set.data = set.shape(points(set.column)); // reshaped lines are rebuilt, not appended to
       else if (set.column) set.data.push({ x: d.ts * 1000, y: d[set.column] ?? null });
     }
-    chart.options.scales.x.min = view.from;
-    chart.options.scales.x.max = view.to;
-    chart.update("none");
-  }
 }
 
 // The points of one value: stored readings, with the live stretch (one a second) in place of
@@ -241,11 +320,12 @@ function draw(id, series, y = {}) {
   charts[id] = new Chart(el(id), {
     type: "line",
     data: {
-      datasets: series.map(({ label, color, column, data, shape, extra }) => ({
+      datasets: series.map(({ label, color, column, data, shape, forecast, extra }) => ({
         label,
         column,
         shape,
-        data: data ?? (column ? (shape ? shape(points(column)) : points(column)) : []),
+        forecast,
+        data: data ?? (forecast ? predict(forecast) : column ? (shape ? shape(points(column)) : points(column)) : []),
         borderColor: color,
         backgroundColor: color,
         borderWidth: 2,
@@ -279,6 +359,7 @@ function draw(id, series, y = {}) {
           ticks: {
             color: css("--fg2"),
             maxRotation: 0,
+            autoSkipPadding: 12, // labels that only just fit still read as one string ("10:0011:00") on a phone
             callback: (ms) =>
               hours <= 24
                 ? new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
@@ -306,10 +387,20 @@ async function loadHistory() {
   } catch {
     return;
   }
-  view.to = Date.now();
-  view.from = view.to - hours * 3600 * 1000;
+  view.to = aheadTo(Date.now());
+  view.from = Date.now() - hours * 3600e3;
 
-  draw("chart-level", [{ label: "Battery %", color: css("--accent"), column: "battery_level" }], { min: 0, max: 100 });
+  const dashed = { borderDash: [6, 4], pointHitRadius: 0 };
+  draw(
+    "chart-level",
+    [
+      { label: "Battery %", color: css("--accent"), column: "battery_level" },
+      { label: "Forecast, PC on", color: css("--accent"), forecast: "PC on", extra: dashed },
+      { label: "Forecast, PC off", color: css("--fg2"), forecast: "PC off", extra: dashed },
+      { label: "Possible outage", color: css("--red") }, // no points of its own; the bands are drawn by outageBands
+    ],
+    { min: 0, max: 100 },
+  );
   draw("chart-grid", [{ label: "Grid V", color: css("--accent"), column: "ac_input_voltage" }], { min: 0 });
   draw("chart-inverter", [
     { label: "Inverter °C", color: css("--accent"), column: "inverter_temperature", shape: throughCrossings },
