@@ -152,7 +152,8 @@ def save(state: dict) -> None:
 
 def run() -> None:
     if not CLOCK_SET.exists():
-        sys.exit("clock not synchronised yet; skipping")
+        print("clock not synchronised yet; skipping")  # not a failure: the next run will do
+        return
     now = dt.datetime.now().replace(microsecond=0)
     try:
         old = json.loads(OUT.read_text())
