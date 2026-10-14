@@ -89,7 +89,12 @@ def spans(days: dict) -> list[tuple[dt.datetime, dt.datetime]]:
 
 
 def lasts(hours: float) -> str:
-    return f"{int(hours)} h {round(hours % 1 * 60):02d} min" if hours < 20 else f"{round(hours)} h"
+    return f"{int(hours)}h{round(hours % 1 * 60):02d}" if hours < 20 else f"{round(hours)}h"
+
+
+def short(hhmm: str) -> str:
+    """'18:00' -> '18', '18:30' stays."""
+    return hhmm[:-3] if hhmm.endswith(":00") else hhmm
 
 
 def battery_line(battery: dict | None) -> str:
@@ -97,29 +102,32 @@ def battery_line(battery: dict | None) -> str:
         return ""
     above = max(0, battery["battery_level"] - battery["battery_charge_limit_min"])
     on, off = (above / DRAIN[name] for name in ("PC on", "PC off"))
-    return (f"\nBattery {battery['battery_level']:.0f}%: lasts ~{lasts(on)} with the PC on, "
-            f"~{lasts(off)} with it off (to the {battery['battery_charge_limit_min']:.0f}% cutoff).")
+    return f" · {battery['battery_level']:.0f}% lasts {lasts(on)} PC on, {lasts(off)} off"
 
 
 def day_label(day: str, now: dt.datetime) -> str:
     offset = (dt.date.fromisoformat(day) - now.date()).days
-    return {0: "today", 1: "tomorrow"}.get(offset, dt.date.fromisoformat(day).strftime("%d %b"))
+    return {0: "Today", 1: "Tomorrow"}.get(offset, dt.date.fromisoformat(day).strftime("%d %b"))
 
 
 def messages(old: dict, days: dict, now: dt.datetime, battery: dict | None) -> tuple[list[str], list[str]]:
-    """The Telegram messages this run owes, and the window starts warned about (old ones dropped)."""
+    """The Telegram messages this run owes, and the window starts warned about (old ones dropped).
+
+    He asked for them short (14 Oct): no queue, no "possible", hours without ":00".
+    """
     out = []
     for day, info in sorted(days.items()):
         if info["windows"] == old.get("days", {}).get(day, {}).get("windows"):
             continue
-        what = "changed" if day in old.get("days", {}) else "posted"
-        slots = ", ".join(f"{a}–{b}" for a, b in info["windows"]) or "none listed"
-        out.append(f"🔌 Schedule {what} for {day_label(day, now)}, queue {QUEUE}: {slots}. Possible, not certain.")
+        changed = ", changed" if day in old.get("days", {}) else ""
+        slots = ", ".join(f"{short(a)}–{short(b)}" for a, b in info["windows"]) or "no outages"
+        out.append(f"🔌 {day_label(day, now)}{changed}: {slots}")
     warned = [start for start in old.get("warned", []) if start >= (now - dt.timedelta(days=2)).isoformat()]
     for start, end in spans(days):
         if now < start <= now + WARN_BEFORE and start.isoformat() not in warned:
-            out.append(f"⚡ Possible outage {start:%H:%M}–{end:%H:%M} (queue {QUEUE}), "
-                       f"in {round((start - now).total_seconds() / 60)} min." + battery_line(battery))
+            until = "24" if end.time() == dt.time(0) else short(f"{end:%H:%M}")  # as the post writes midnight
+            hours = f"{short(f'{start:%H:%M}')}–{until}"
+            out.append(f"⚡ {hours} in {round((start - now).total_seconds() / 60)} min" + battery_line(battery))
             warned.append(start.isoformat())
     return out, warned
 
@@ -181,15 +189,16 @@ def demo() -> None:
     battery = {"battery_level": 90.0, "battery_charge_limit_min": 15}
     # first sight of a day: one "posted" message; nothing to warn about at 15:00
     texts, warned = messages({}, days, dt.datetime(2026, 10, 14, 15), battery)
-    assert texts == ["🔌 Schedule posted for today, queue 2.1: 10:00–12:00, 18:00–24:00. Possible, not certain."] and warned == []
+    assert texts == ["🔌 Today: 10–12, 18–24"] and warned == [], texts
     old = {"days": days, "warned": warned}
     # 17:40: the 18:00 window is 20 minutes away, warned once, with the battery estimate
     texts, warned = messages(old, days, dt.datetime(2026, 10, 14, 17, 40), battery)
-    assert len(texts) == 1 and "18:00–00:00" in texts[0] and "in 20 min" in texts[0] and "~3 h 20 min with the PC on" in texts[0], texts
+    assert texts == ["⚡ 18–24 in 20 min · 90% lasts 3h20 PC on, 27h off"], texts
     assert messages({"days": days, "warned": warned}, days, dt.datetime(2026, 10, 14, 17, 50), battery) == ([], warned)
     # a changed schedule is announced again
     texts, _ = messages(old, {"2026-10-14": {"windows": [["18:00", "20:00"]]}}, dt.datetime(2026, 10, 14, 15), None)
-    assert texts == ["🔌 Schedule changed for today, queue 2.1: 18:00–20:00. Possible, not certain."], texts
+    assert texts == ["🔌 Today, changed: 18–20"], texts
+    assert short("18:30") == "18:30" and lasts(26.8) == "27h"
 
     global OUT
     with tempfile.TemporaryDirectory() as tmp:
