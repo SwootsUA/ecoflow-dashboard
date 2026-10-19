@@ -17,6 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import outages
 from ble_read import Station
 
 # the library warns on every disconnect, and every read ends with one
@@ -49,6 +50,44 @@ def save(db: sqlite3.Connection, values: dict, ts: int) -> None:
     marks = ", ".join("?" * len(values))
     db.execute(f"INSERT INTO readings (ts, {columns}) VALUES (?, {marks})", [ts, *values.values()])
     db.commit()
+
+
+def on_grid(voltage, power) -> bool:
+    """The page's rule: inverter voltage, or input watts while charging with the inverter reading 0."""
+    return (voltage or 0) > 50 or (power or 0) > 0
+
+
+def grid_change(db: sqlite3.Connection, values: dict, ts: int) -> str | None:
+    """The Telegram message when this reading flips the grid against the last stored row, else None.
+
+    It compares with the database, not memory, so it is right after a restart too: when the station
+    ran flat and took the Pi with it, the first row after boot reports the grid coming back.
+    Every outage counts, posted or not, and an unplugged station looks the same as a dead grid.
+    """
+    try:
+        last = db.execute("SELECT ac_input_voltage, ac_input_power FROM readings ORDER BY ts DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:  # a new database: no grid columns until the first row
+        return None
+    now = on_grid(values.get("ac_input_voltage"), values.get("ac_input_power"))
+    if last is None or on_grid(*last) == now:
+        return None
+    clock = time.strftime("%H:%M", time.localtime(ts))
+    battery = values.get("battery_level") or 0
+    if not now:
+        line = outages.battery_line({"battery_level": battery,
+                                     "battery_charge_limit_min": values.get("battery_charge_limit_min") or 0})
+        return f"🔴 No grid since {clock}{line}"
+    on_ts = db.execute("SELECT max(ts) FROM readings WHERE ac_input_voltage > 50 OR ac_input_power > 0").fetchone()[0]
+    since = db.execute("SELECT min(ts) FROM readings WHERE ts > ?", (on_ts or 0,)).fetchone()[0]
+    gone = outages.lasts((ts - since) / 3600) if since else "?"
+    return f"🟢 Grid back {clock} after {gone} · battery {battery:.0f}%"
+
+
+def tell(text: str) -> None:
+    try:
+        outages.send(text)
+    except OSError as e:  # the bot being down must not cost a row
+        print(f"telegram: {e}", flush=True)
 
 
 def open_db(path: Path) -> sqlite3.Connection:
@@ -93,7 +132,11 @@ class Collector:
                 values = station.read()
                 publish(values, self.clock())
                 if time.monotonic() >= self.row_due:
-                    save(self.db, values, int(self.clock()))
+                    ts = int(self.clock())
+                    change = grid_change(self.db, values, ts)
+                    save(self.db, values, ts)
+                    if change:
+                        await asyncio.to_thread(tell, change)
                     # an unwatched read is due a minute after it began, not after it ended
                     self.row_due = max(self.row_due, started) + EVERY
                 if not viewer_present():
@@ -127,6 +170,18 @@ class Collector:
 
 def demo() -> None:
     global LIVE, VIEWER, EVERY, TICK
+    grid = open_db(Path(":memory:"))
+    on = {"battery_level": 99.0, "battery_charge_limit_min": 15, "ac_input_voltage": 228, "ac_input_power": 0}
+    off = dict(on, ac_input_voltage=0)
+    t0 = 1792400000  # stamps in local time below
+    assert grid_change(grid, on, t0) is None  # nothing stored yet
+    save(grid, on, t0)
+    assert grid_change(grid, on, t0 + 60) is None
+    assert grid_change(grid, off, t0 + 60).startswith(f"🔴 No grid since {time.strftime('%H:%M', time.localtime(t0 + 60))} · 99% lasts 4h00 PC on")
+    save(grid, off, t0 + 60)
+    save(grid, dict(off, battery_level=70.0), t0 + 7260)
+    back = grid_change(grid, dict(on, battery_level=70.0, ac_input_voltage=0, ac_input_power=700), t0 + 7320)
+    assert back == f"🟢 Grid back {time.strftime('%H:%M', time.localtime(t0 + 7320))} after 2h01 · battery 70%", back
 
     db = open_db(":memory:")
     save(db, {"battery_level": 88.7, "ac_ports": True, "battery_1_sn": None}, 1)
