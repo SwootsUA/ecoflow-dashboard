@@ -13,6 +13,12 @@ const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one
 const AHEAD = 2; // hours of forecast right of now (the 1 h view gets 1)
 // %/h the battery gains recharging on the grid: 50-59 at ~600-680 W into it, no slowdown near full (13-19 Oct)
 const CHARGE = 55;
+// Battery %/h on battery from the load: 2.61 + 0.1022 x W, fitted on the 13 outages of 13-19 Oct. With the load
+// averaged over the last 10 minutes it predicts an hour ahead about as well as anything tried (2.9-3.2 %-points
+// off, against 5.8 for a fixed rate), and unlike the battery's own slope it also works before the outage.
+const DRAIN_BASE = 2.61;
+const DRAIN_PER_W = 0.1022;
+const RECENT_MS = 10 * 60e3;
 const FLOOR = 18; // watts: the station reports 0 for anything smaller (the lowest non-zero value it has ever sent)
 
 let hours = 24;
@@ -128,7 +134,18 @@ function showOutage() {
 // The battery from the newest reading to the right edge. On the grid it holds, or charges (after an
 // outage, or when it already is); through a possible outage it drains at the rate measured for that
 // load, down to the discharge limit where the station cuts out.
+// The load over the last 10 minutes, from the stored rows and the live readings
+function recentWatts() {
+  if (!stored) return null;
+  const since = Date.now() - RECENT_MS;
+  const ws = points("output_power").filter((p) => p.x >= since && p.y != null).map((p) => p.y);
+  return ws.length ? ws.reduce((a, b) => a + b, 0) / ws.length : null;
+}
+
 function predict(load) {
+  const watts = load === "recent" ? recentWatts() : null;
+  if (load === "recent" && watts == null) return [];
+  const rate = load === "recent" ? DRAIN_BASE + DRAIN_PER_W * watts : outages.drain?.[load];
   const d = last;
   if (d.battery_level == null || !outages.drain) return [];
   const floor = d.battery_charge_limit_min ?? 0;
@@ -143,7 +160,7 @@ function predict(load) {
     const next = Math.min(t + 300e3, view.to, ...slots.flat().filter((edge) => edge > t)); // steps break at slot edges
     const span = (next - t) / 3600e3;
     if (t < offUntil || slots.some(([s, e]) => s <= t && t < e)) {
-      level = Math.max(floor, level - outages.drain[load] * span);
+      level = Math.max(floor, level - rate * span);
       charging = true; // the grid's return starts a recharge
     } else if (charging) {
       level = Math.min(top, level + CHARGE * span);
@@ -395,7 +412,8 @@ async function loadHistory() {
     "chart-level",
     [
       { label: "Battery %", color: css("--accent"), column: "battery_level" },
-      { label: "Forecast, PC on", color: css("--accent"), forecast: "PC on", extra: dashed },
+      { label: "Forecast, last 10 min", color: css("--accent"), forecast: "recent", extra: dashed },
+      { label: "Forecast, PC on", color: css("--series2"), forecast: "PC on", extra: dashed },
       { label: "Forecast, PC off", color: css("--fg2"), forecast: "PC off", extra: dashed },
       { label: "Possible outage", color: css("--red") }, // no points of its own; the bands are drawn by outageBands
     ],
