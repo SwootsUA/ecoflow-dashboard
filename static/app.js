@@ -11,9 +11,8 @@ const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // s
 const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
 const AHEAD = 2; // hours of forecast right of now (the 1 h view gets 1)
-// %/h the battery gained on the grid after the 14 Oct outage (694 W in at 34%)
-// ponytail: one measurement; it likely slows near the top, re-measure after a few more outages
-const CHARGE = 43;
+// %/h the battery gains recharging on the grid: 50-59 at ~600-680 W into it, no slowdown near full (13-19 Oct)
+const CHARGE = 55;
 const FLOOR = 18; // watts: the station reports 0 for anything smaller (the lowest non-zero value it has ever sent)
 
 let hours = 24;
@@ -108,6 +107,7 @@ async function loadOutages() {
   const at = (day, hhmm) => new Date(`${day}T00:00`).setHours(...hhmm.split(":").map(Number)); // "24:00" rolls to the next day
   slots = Object.entries(outages.days ?? {})
     .flatMap(([day, d]) => d.windows.map(([a, b]) => [at(day, a), at(day, b)]))
+    .concat((outages.unplanned ?? []).map((e) => [Date.parse(e.start), Date.parse(e.stop)])) // emergency and planned works at home
     .sort((x, y) => x[0] - y[0]);
   moveRight();
 }

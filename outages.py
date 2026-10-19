@@ -18,8 +18,10 @@ import json
 import os
 import re
 import sqlite3
+import ssl
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from contextlib import closing
 from pathlib import Path
@@ -27,13 +29,26 @@ from pathlib import Path
 QUEUE = os.environ.get("OUTAGE_QUEUE", "2.1")
 POSTS = "https://www.cherkasyoblenergo.com/api/v1/posts"
 OUT = Path(os.environ.get("ECOFLOW_OUTAGES", "/home/pi/data/ecoflow/outages.json"))
+HISTORY = OUT.with_name("outages-history.jsonl")  # every version of every day's post, as first seen
 DB = Path(os.environ.get("ECOFLOW_DB", "/home/pi/data/ecoflow/ecoflow.db"))
 SEND = "http://127.0.0.1:8010/send"
 CLOCK_SET = Path("/run/systemd/timesync/synchronized")  # no RTC: after an outage the Pi boots in the past
 WARN_BEFORE = dt.timedelta(minutes=30)
-# Battery % used per hour, measured in the 14 Oct outage. The page reads these from OUT too.
-# ponytail: one outage's numbers; re-measure once a few more outages are logged
-DRAIN = {"PC on": 22.5, "PC off": 2.8}
+# Battery % used per hour on battery, measured over the 12 outages of 13-19 Oct: 150-200 W (the PC in use)
+# and below 18 W (PC off, router and Pi). The page reads these from OUT too.
+DRAIN = {"PC on": 21, "PC off": 2.6}
+
+# Emergency and planned-works outages, from the oblenergo's whole-city list (the same data as its
+# "check by address" page). Only the district goes out in the request; the building is matched here.
+# Off until OUTAGE_STREET and OUTAGE_HOUSE are set, written as the oblenergo writes them ("Ю. Іллєнка", "4").
+CABINET = "https://cabinet.cherkasyoblenergo.com/api_new/disconn.php"
+STREET = os.environ.get("OUTAGE_STREET", "")
+HOUSE = os.environ.get("OUTAGE_HOUSE", "")
+KINDS = {"0": "Planned works", "1": "Emergency outage"}
+# Their server leaves Sectigo's intermediate out of its chain; the repo carries that public cert so
+# the connection is still verified, not skipped.
+TLS = ssl.create_default_context()
+TLS.load_verify_locations(Path(__file__).with_name("certs") / "sectigo-dv-r36.pem")
 MONTHS = ("січня", "лютого", "березня", "квітня", "травня", "червня",
           "липня", "серпня", "вересня", "жовтня", "листопада", "грудня")
 
@@ -69,14 +84,74 @@ def windows(content: str, queue: str) -> list[list[str]]:
 
 
 def fetch(today: str, queue: str = QUEUE) -> dict:
-    """{day: {"windows", "title", "published"}} from the newest post for each day from today on."""
+    """{day: {"windows", "title", "published", "versions"}} for each day from today on.
+
+    The newest post is the one that counts ("Оновлено ..." replaces the morning's), so its windows lead;
+    "versions" keeps every post for the day, newest first, because a slot an update drops can still come
+    (15 Oct: 08-10 was taken out of the update, and the outage came at 08:04 anyway).
+    """
     days = {}
     for post in sorted(get(f"{POSTS}/main?lang=uk&limit=50"), key=lambda p: p["publishedAt"], reverse=True):
         day = post_day(post["title"], post["publishedAt"])
-        if day and day >= today and day not in days:
+        if day and day >= today:
             body = get(f"{POSTS}/{post['slug']}?lang=uk")["content"]
-            days[day] = {"windows": windows(body, queue), "title": post["title"], "published": post["publishedAt"]}
+            version = {"windows": windows(body, queue), "title": post["title"], "published": post["publishedAt"]}
+            days.setdefault(day, dict(version, versions=[]))["versions"].append(version)
     return days
+
+
+def record(days: dict) -> int:
+    """Append the versions not in HISTORY yet; returns how many were new."""
+    try:
+        seen = {(r["day"], r["published"]) for r in map(json.loads, HISTORY.read_text().splitlines())}
+    except OSError:
+        seen = set()
+    new = [dict(v, day=day) for day, info in sorted(days.items()) for v in reversed(info["versions"])
+           if (day, v["published"]) not in seen]
+    with HISTORY.open("a") as fh:
+        for row in new:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return len(new)
+
+
+def at_building(address: str, street: str = STREET, house: str = HOUSE) -> bool:
+    """'<strong>м. Черкаси</strong><br>вул. Ю. Іллєнка 4' against the street and house number."""
+    text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", address)).split()).lower()
+    i = text.find(street.lower())
+    if not street or i < 0:
+        return False
+    # only the numbers right after the street: one row can go on to another street ("... 305 вул. Припортова 43")
+    for token in re.split(r"[\s,;]+", text[i + len(street):].strip()):
+        if not re.fullmatch(r"\d+[\w/-]*", token):
+            return False
+        if token == house.lower():
+            return True
+    return False
+
+
+def stamp(text: str) -> str:
+    """'17:00 16.10.2026 (план)' -> '2026-10-16T17:00:00'."""
+    return dt.datetime.strptime(text.split("(")[0].strip(), "%H:%M %d.%m.%Y").isoformat()
+
+
+def unplanned(now: dt.datetime) -> list[dict]:
+    """Emergency and planned-works outages at the building, today and tomorrow."""
+    if not (STREET and HOUSE):
+        return []
+    found = []
+    for selector, kind in KINDS.items():
+        query = {"op": "disconn_by_dept", "dept_id": "1", "disconn_selector": selector,  # 1 = Cherkasy city
+                 "n_date": f"{now:%d.%m.%Y}", "k_date": f"{now + dt.timedelta(days=1):%d.%m.%Y}"}
+        request = urllib.request.Request(f"{CABINET}?{urllib.parse.urlencode(query)}",
+                                         headers={"User-Agent": "Mozilla/5.0 (swoots ecoflow page)"})
+        with urllib.request.urlopen(request, timeout=60, context=TLS) as response:
+            rows = json.loads(response.read().decode("utf-8", "ignore")).get("DISCONNECTIONS") or []
+        for row in rows if isinstance(rows, list) else rows.values():
+            if at_building(row.get("ADDRESS", "")):
+                found.append({"kind": kind, "start": stamp(row["DATE_START"]), "stop": stamp(row["DATE_STOP"]),
+                              "planned_stop": "план" in row["DATE_STOP"], "over": row.get("STATE_INT") == "-1"})
+    unique = {(e["kind"], e["start"], e["stop"]): e for e in found}  # one outage can be listed once per line
+    return sorted(unique.values(), key=lambda e: e["start"])
 
 
 def spans(days: dict) -> list[tuple[dt.datetime, dt.datetime]]:
@@ -132,6 +207,18 @@ def messages(old: dict, days: dict, now: dt.datetime, battery: dict | None) -> t
     return out, warned
 
 
+def unplanned_messages(old: dict, events: list[dict]) -> list[str]:
+    """One message per emergency or planned-works outage at the building, when first seen and not over yet."""
+    known = {(e["kind"], e["start"]) for e in old.get("unplanned", [])}
+    out = []
+    for e in events:
+        if (e["kind"], e["start"]) in known or e["over"]:
+            continue
+        start, stop = dt.datetime.fromisoformat(e["start"]), dt.datetime.fromisoformat(e["stop"])
+        out.append(f"⚠️ {e['kind']} at home: {start:%H:%M}–{stop:%H:%M}" + (" (planned end)" if e["planned_stop"] else ""))
+    return out
+
+
 def send(text: str) -> None:
     token = os.environ.get("NOTIFY_TOKEN")
     if not token:  # run by hand: show it instead
@@ -168,10 +255,17 @@ def run() -> None:
     except (OSError, ValueError):
         old = {}
     days = fetch(now.date().isoformat())
+    record(days)
+    try:
+        events = unplanned(now)
+    except (OSError, ValueError) as e:  # the cabinet API is a second source; its outage must not stop the schedule
+        print(f"unplanned outages: {e}")
+        events = old.get("unplanned", [])
     texts, warned = messages(old, days, now, latest_battery())
-    for text in texts:
+    for text in texts + unplanned_messages(old, events):
         send(text)  # a failed send raises before the save, so the next run tries again
-    save({"queue": QUEUE, "checked": now.isoformat(), "days": days, "warned": warned, "drain": DRAIN})
+    save({"queue": QUEUE, "checked": now.isoformat(), "days": days, "unplanned": events, "warned": warned,
+          "drain": DRAIN})
 
 
 def demo() -> None:
@@ -193,18 +287,36 @@ def demo() -> None:
     old = {"days": days, "warned": warned}
     # 17:40: the 18:00 window is 20 minutes away, warned once, with the battery estimate
     texts, warned = messages(old, days, dt.datetime(2026, 10, 14, 17, 40), battery)
-    assert texts == ["⚡ 18–24 in 20 min · 90% lasts 3h20 PC on, 27h off"], texts
+    assert texts == ["⚡ 18–24 in 20 min · 90% lasts 3h34 PC on, 29h off"], texts
     assert messages({"days": days, "warned": warned}, days, dt.datetime(2026, 10, 14, 17, 50), battery) == ([], warned)
     # a changed schedule is announced again
     texts, _ = messages(old, {"2026-10-14": {"windows": [["18:00", "20:00"]]}}, dt.datetime(2026, 10, 14, 15), None)
     assert texts == ["🔌 Today, changed: 18–20"], texts
     assert short("18:30") == "18:30" and lasts(26.8) == "27h"
 
-    global OUT
+    assert at_building("<strong>м. Черкаси</strong><br>вул. Ю. Іллєнка 4", "Ю. Іллєнка", "4")
+    assert not at_building("<strong>м. Черкаси</strong><br>вул. Ю. Іллєнка 46", "Ю. Іллєнка", "4")
+    assert at_building("м. Черкаси вул. Ю. Іллєнка 2, 4, 6", "ю. іллєнка", "4")
+    assert not at_building("вул. Ю. Іллєнка 4", "", "")
+    assert not at_building("м. Черкаси б-р Т. Шевченка 305 вул. Припортова 43", "Т. Шевченка", "43")
+    assert at_building("м. Черкаси б-р Т. Шевченка 305 вул. Припортова 43", "Припортова", "43")
+    assert stamp("17:00 16.10.2026 (план)") == "2026-10-16T17:00:00"
+    event = {"kind": "Emergency outage", "start": "2026-10-16T14:01:00", "stop": "2026-10-16T17:00:00",
+             "planned_stop": True, "over": False}
+    assert unplanned_messages({}, [event]) == ["⚠️ Emergency outage at home: 14:01–17:00 (planned end)"]
+    assert unplanned_messages({"unplanned": [event]}, [event]) == []
+    assert unplanned_messages({}, [dict(event, over=True)]) == []
+
+    global OUT, HISTORY
     with tempfile.TemporaryDirectory() as tmp:
-        OUT = Path(tmp, "outages.json")
+        OUT, HISTORY = Path(tmp, "outages.json"), Path(tmp, "history.jsonl")
         save({"days": days})
         assert json.loads(OUT.read_text())["days"] == days
+        v1 = {"windows": [["08:00", "10:00"]], "title": "a", "published": "2026-10-14T21:00:00"}
+        v2 = {"windows": [], "title": "b", "published": "2026-10-15T07:00:00"}
+        assert record({"2026-10-15": {"versions": [v1]}}) == 1
+        assert record({"2026-10-15": {"versions": [v2, v1]}}) == 1  # only the update is new
+        assert [r["published"] for r in map(json.loads, HISTORY.read_text().splitlines())] == [v1["published"], v2["published"]]
     print("ok")
 
 
