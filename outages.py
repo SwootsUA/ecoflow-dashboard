@@ -30,6 +30,9 @@ QUEUE = os.environ.get("OUTAGE_QUEUE", "2.1")
 POSTS = "https://www.cherkasyoblenergo.com/api/v1/posts"
 OUT = Path(os.environ.get("ECOFLOW_OUTAGES", "/home/pi/data/ecoflow/outages.json"))
 HISTORY = OUT.with_name("outages-history.jsonl")  # every version of every day's post, as first seen
+# Outages heard of some other way (the landlord, a notice on the door), kept by hand:
+# [{"kind": "Planned outage (landlord)", "start": "2026-10-22T08:00:00", "stop": "2026-10-22T17:00:00"}]
+MANUAL = OUT.with_name("outages-manual.json")
 DB = Path(os.environ.get("ECOFLOW_DB", "/home/pi/data/ecoflow/ecoflow.db"))
 SEND = "http://127.0.0.1:8010/send"
 CLOCK_SET = Path("/run/systemd/timesync/synchronized")  # no RTC: after an outage the Pi boots in the past
@@ -207,7 +210,17 @@ def messages(old: dict, days: dict, now: dt.datetime, battery: dict | None) -> t
     return out, warned
 
 
-def unplanned_messages(old: dict, events: list[dict]) -> list[str]:
+def manual(now: dt.datetime) -> list[dict]:
+    """MANUAL's outages that haven't ended, in the same shape as unplanned()'s."""
+    try:
+        rows = json.loads(MANUAL.read_text())
+    except (OSError, ValueError):
+        return []
+    return [{"kind": r["kind"], "start": r["start"], "stop": r["stop"], "planned_stop": True, "over": False}
+            for r in rows if dt.datetime.fromisoformat(r["stop"]) > now]
+
+
+def unplanned_messages(old: dict, events: list[dict], now: dt.datetime | None = None) -> list[str]:
     """One message per emergency or planned-works outage at the building, when first seen and not over yet."""
     known = {(e["kind"], e["start"]) for e in old.get("unplanned", [])}
     out = []
@@ -215,7 +228,9 @@ def unplanned_messages(old: dict, events: list[dict]) -> list[str]:
         if (e["kind"], e["start"]) in known or e["over"]:
             continue
         start, stop = dt.datetime.fromisoformat(e["start"]), dt.datetime.fromisoformat(e["stop"])
-        out.append(f"⚠️ {e['kind']} at home: {start:%H:%M}–{stop:%H:%M}" + (" (planned end)" if e["planned_stop"] else ""))
+        label = day_label(start.date().isoformat(), now) if now and start.date() != now.date() else ""
+        day = f" {label.lower() if label == 'Tomorrow' else 'on ' + label}" if label else ""
+        out.append(f"⚠️ {e['kind']} at home{day}: {start:%H:%M}–{stop:%H:%M}" + (" (planned end)" if e["planned_stop"] else ""))
     return out
 
 
@@ -260,9 +275,16 @@ def run() -> None:
         events = unplanned(now)
     except (OSError, ValueError) as e:  # the cabinet API is a second source; its outage must not stop the schedule
         print(f"unplanned outages: {e}")
-        events = old.get("unplanned", [])
-    texts, warned = messages(old, days, now, latest_battery())
-    for text in texts + unplanned_messages(old, events):
+        events = [e for e in old.get("unplanned", []) if e.get("kind") in KINDS.values()]
+    events = sorted({(e["kind"], e["start"], e["stop"]): e for e in events + manual(now)}.values(), key=lambda e: e["start"])
+    battery = latest_battery()
+    texts, warned = messages(old, days, now, battery)
+    for e in events:  # the same half-hour warning as for the posted slots
+        start = dt.datetime.fromisoformat(e["start"])
+        if not e["over"] and now < start <= now + WARN_BEFORE and e["start"] not in warned:
+            texts.append(f"⚡ {e['kind']} in {round((start - now).total_seconds() / 60)} min" + battery_line(battery))
+            warned.append(e["start"])
+    for text in texts + unplanned_messages(old, events, now):
         send(text)  # a failed send raises before the save, so the next run tries again
     save({"queue": QUEUE, "checked": now.isoformat(), "days": days, "unplanned": events, "warned": warned,
           "drain": DRAIN})
@@ -306,10 +328,17 @@ def demo() -> None:
     assert unplanned_messages({}, [event]) == ["⚠️ Emergency outage at home: 14:01–17:00 (planned end)"]
     assert unplanned_messages({"unplanned": [event]}, [event]) == []
     assert unplanned_messages({}, [dict(event, over=True)]) == []
+    assert unplanned_messages({}, [event], dt.datetime(2026, 10, 14, 9)) == ["⚠️ Emergency outage at home on 16 Oct: 14:01–17:00 (planned end)"]
 
     global OUT, HISTORY
     with tempfile.TemporaryDirectory() as tmp:
         OUT, HISTORY = Path(tmp, "outages.json"), Path(tmp, "history.jsonl")
+        global MANUAL
+        MANUAL = Path(tmp, "manual.json")
+        assert manual(dt.datetime(2026, 10, 20)) == []  # no file
+        MANUAL.write_text(json.dumps([{"kind": "Planned outage (landlord)", "start": "2026-10-22T08:00:00", "stop": "2026-10-22T17:00:00"},
+                                      {"kind": "Old", "start": "2026-10-01T08:00:00", "stop": "2026-10-01T10:00:00"}]))
+        assert [e["kind"] for e in manual(dt.datetime(2026, 10, 20))] == ["Planned outage (landlord)"]
         save({"days": days})
         assert json.loads(OUT.read_text())["days"] == days
         v1 = {"windows": [["08:00", "10:00"]], "title": "a", "published": "2026-10-14T21:00:00"}
