@@ -12,7 +12,7 @@ const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_volta
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
 const AHEAD = 2; // hours of forecast right of now (the 1 h view gets 1)
 // %/h the battery gains recharging on the grid: 50-59 at ~600-680 W into it, no slowdown near full (13-19 Oct)
-const CHARGE = 55;
+const CHARGE = 41; // %/h at the 500 W charge cap (measured 41-42, 21-27 Oct)
 // Battery %/h on battery from the load: 2.61 + 0.1022 x W, fitted on the 13 outages of 13-19 Oct. With the load
 // averaged over the last 10 minutes it predicts an hour ahead about as well as anything tried (2.9-3.2 %-points
 // off, against 5.8 for a fixed rate), and unlike the battery's own slope it also works before the outage.
@@ -102,7 +102,7 @@ function showLatest(d) {
 // Possible outages for the queue, from outages.py (it reads the oblenergo's daily posts). A posted slot
 // can still be skipped, so the charts show them as "possible": hatched bands, with a forecast through them.
 let outages = {};
-let slots = []; // [start ms, end ms] of each posted slot, soonest first
+let slots = []; // [start ms, end ms, dropped] of each posted slot, soonest first; dropped = an update took it out
 
 async function loadOutages() {
   try {
@@ -111,9 +111,14 @@ async function loadOutages() {
     return;
   }
   const at = (day, hhmm) => new Date(`${day}T00:00`).setHours(...hhmm.split(":").map(Number)); // "24:00" rolls to the next day
-  slots = Object.entries(outages.days ?? {})
-    .flatMap(([day, d]) => d.windows.map(([a, b]) => [at(day, a), at(day, b)]))
-    .concat((outages.unplanned ?? []).map((e) => [Date.parse(e.start), Date.parse(e.stop)])) // emergency and planned works at home
+  // a slot an update dropped still comes most of the time (27 Oct: 7 of the week's 19 outages), so it stays, marked
+  const found = new Map();
+  for (const [day, d] of Object.entries(outages.days ?? {})) {
+    for (const [a, b] of d.windows) found.set(`${day} ${a} ${b}`, [at(day, a), at(day, b), false]);
+    for (const v of d.versions ?? []) for (const [a, b] of v.windows) if (!found.has(`${day} ${a} ${b}`)) found.set(`${day} ${a} ${b}`, [at(day, a), at(day, b), true]);
+  }
+  slots = [...found.values()]
+    .concat((outages.unplanned ?? []).map((e) => [Date.parse(e.start), Date.parse(e.stop), false])) // emergency and planned works at home
     .sort((x, y) => x[0] - y[0]);
   moveRight();
 }
@@ -124,7 +129,8 @@ function showOutage() {
   const hm = (ms) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   const day = (ms) => (new Date(ms).toDateString() === new Date(now).toDateString() ? "today" : new Date(ms).toLocaleDateString("en-GB", { weekday: "long" }));
   let text = "";
-  if (next) text = next[0] <= now ? `possible outage now, until ${hm(next[1])}` : `next possible outage ${day(next[0])} ${hm(next[0])}–${hm(next[1])}`;
+  const dropped = next?.[2] ? " (dropped in an update)" : "";
+  if (next) text = next[0] <= now ? `possible outage now, until ${hm(next[1])}${dropped}` : `next possible outage ${day(next[0])} ${hm(next[0])}–${hm(next[1])}${dropped}`;
   if (outages.queue) text += `${text ? ", " : ""}queue ${outages.queue}`;
   const checked = (now - new Date(outages.checked)) / 1000;
   if (checked > 3600) text += `, schedule checked ${ago(checked)}`;
@@ -215,11 +221,13 @@ Chart.register({
     }
     ctx.save();
     ctx.fillStyle = chart.$hatch;
-    for (const [start, end] of slots) {
+    for (const [start, end, dropped] of slots) {
       const left = Math.max(x.getPixelForValue(start), area.left);
       const right = Math.min(x.getPixelForValue(end), area.right);
+      ctx.globalAlpha = dropped ? 0.45 : 1; // dropped in an update: lighter, still likely
       if (right > left) ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
     }
+    ctx.globalAlpha = 1;
     const now = x.getPixelForValue(Date.now());
     if (now > area.left && now < area.right) {
       ctx.strokeStyle = css("--fg2");

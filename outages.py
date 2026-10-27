@@ -157,13 +157,24 @@ def unplanned(now: dt.datetime) -> list[dict]:
     return sorted(unique.values(), key=lambda e: e["start"])
 
 
-def spans(days: dict) -> list[tuple[dt.datetime, dt.datetime]]:
-    """Every window as (start, end), soonest first; "24:00" is the next midnight."""
+def spans(days: dict) -> list[tuple[dt.datetime, dt.datetime, bool]]:
+    """Every window as (start, end, dropped), soonest first; "24:00" is the next midnight.
+
+    A slot an update took out still counts, marked dropped: in the week to 27 Oct nearly every dropped
+    slot came anyway, 7 of that week's 19 outages, none of them warned.
+    """
     def at(day, hhmm):
         hours, minutes = map(int, hhmm.split(":"))
         return dt.datetime.fromisoformat(day) + dt.timedelta(hours=hours, minutes=minutes)
 
-    return sorted((at(day, a), at(day, b)) for day, info in days.items() for a, b in info["windows"])
+    found = {}
+    for day, info in days.items():
+        for a, b in info["windows"]:
+            found[at(day, a), at(day, b)] = False
+        for version in info.get("versions", []):
+            for a, b in version["windows"]:
+                found.setdefault((at(day, a), at(day, b)), True)
+    return sorted((start, end, dropped) for (start, end), dropped in found.items())
 
 
 def lasts(hours: float) -> str:
@@ -201,11 +212,12 @@ def messages(old: dict, days: dict, now: dt.datetime, battery: dict | None) -> t
         slots = ", ".join(f"{short(a)}–{short(b)}" for a, b in info["windows"]) or "no outages"
         out.append(f"🔌 {day_label(day, now)}{changed}: {slots}")
     warned = [start for start in old.get("warned", []) if start >= (now - dt.timedelta(days=2)).isoformat()]
-    for start, end in spans(days):
+    for start, end, dropped in spans(days):
         if now < start <= now + WARN_BEFORE and start.isoformat() not in warned:
             until = "24" if end.time() == dt.time(0) else short(f"{end:%H:%M}")  # as the post writes midnight
             hours = f"{short(f'{start:%H:%M}')}–{until}"
-            out.append(f"⚡ {hours} in {round((start - now).total_seconds() / 60)} min" + battery_line(battery))
+            note = " (dropped in an update)" if dropped else ""
+            out.append(f"⚡ {hours} in {round((start - now).total_seconds() / 60)} min{note}" + battery_line(battery))
             warned.append(start.isoformat())
     return out, warned
 
@@ -301,7 +313,13 @@ def demo() -> None:
     assert post_day("Для промисловості та бізнесу 14 жовтня діятимуть ГОП", "2026-10-13T19:45:00") is None
 
     days = {"2026-10-14": {"windows": [["10:00", "12:00"], ["18:00", "24:00"]]}}
-    assert spans(days)[1] == (dt.datetime(2026, 10, 14, 18), dt.datetime(2026, 10, 15))
+    assert spans(days)[1] == (dt.datetime(2026, 10, 14, 18), dt.datetime(2026, 10, 15), False)
+    # a slot the update dropped is still warned, marked
+    updated = {"2026-10-14": {"windows": [["18:00", "24:00"]], "versions": [
+        {"windows": [["18:00", "24:00"]]}, {"windows": [["08:00", "10:00"], ["18:00", "24:00"]]}]}}
+    assert [s[2] for s in spans(updated)] == [True, False], spans(updated)
+    texts, _ = messages({"days": updated}, updated, dt.datetime(2026, 10, 14, 7, 40), None)
+    assert texts == ["⚡ 08–10 in 20 min (dropped in an update)"], texts
     battery = {"battery_level": 90.0, "battery_charge_limit_min": 15}
     # first sight of a day: one "posted" message; nothing to warn about at 15:00
     texts, warned = messages({}, days, dt.datetime(2026, 10, 14, 15), battery)
