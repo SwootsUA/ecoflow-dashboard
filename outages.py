@@ -37,9 +37,9 @@ DB = Path(os.environ.get("ECOFLOW_DB", "/home/pi/data/ecoflow/ecoflow.db"))
 SEND = "http://127.0.0.1:8010/send"
 CLOCK_SET = Path("/run/systemd/timesync/synchronized")  # no RTC: after an outage the Pi boots in the past
 WARN_BEFORE = dt.timedelta(minutes=30)
-# Battery % used per hour on battery, measured over the 12 outages of 13-19 Oct: 150-200 W (the PC in use)
-# and below 18 W (PC off, router and Pi). The page reads these from OUT too.
-DRAIN = {"PC on": 21, "PC off": 2.6}
+# Battery % used per hour on battery, measured over the outages of 13 Oct - 4 Nov: 35 with the PC in use
+# (68 h, 171 W average) and 4 with it off (7 h, router and Pi, below 18 W). The page reads these from OUT too.
+DRAIN = {"PC on": 20, "PC off": 2.8}
 
 # Emergency and planned-works outages, from the oblenergo's whole-city list (the same data as its
 # "check by address" page). Only the district goes out in the request; the building is matched here.
@@ -327,7 +327,7 @@ def demo() -> None:
     old = {"days": days, "warned": warned}
     # 17:40: the 18:00 window is 20 minutes away, warned once, with the battery estimate
     texts, warned = messages(old, days, dt.datetime(2026, 10, 14, 17, 40), battery)
-    assert texts == ["⚡ 18–24 in 20 min · 90% lasts 3h34 PC on, 29h off"], texts
+    assert texts == ["⚡ 18–24 in 20 min · 90% lasts 3h45 PC on, 27h off"], texts
     assert messages({"days": days, "warned": warned}, days, dt.datetime(2026, 10, 14, 17, 50), battery) == ([], warned)
     # a changed schedule is announced again
     texts, _ = messages(old, {"2026-10-14": {"windows": [["18:00", "20:00"]]}}, dt.datetime(2026, 10, 14, 15), None)

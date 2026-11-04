@@ -11,13 +11,14 @@ const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // s
 const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
 const AHEAD = 2; // hours of forecast right of now (the 1 h view gets 1)
-// %/h the battery gains recharging on the grid: 50-59 at ~600-680 W into it, no slowdown near full (13-19 Oct)
-const CHARGE = 41; // %/h at the 500 W charge cap (measured 41-42, 21-27 Oct)
-// Battery %/h on battery from the load: 2.61 + 0.1022 x W, fitted on the 13 outages of 13-19 Oct. With the load
+// Battery %/h gained per watt of the station's charge-speed setting: 41 %/h at 500 W (21-27 Oct), 62 at 750 W
+// (4 Nov), no slowdown near full. The setting itself comes from the station.
+const CHARGE_PER_W = 0.082;
+// Battery %/h on battery from the load: 2.09 + 0.1043 x W, fitted on the 49 outages of 13 Oct - 4 Nov (0.3 %/h off on average). With the load
 // averaged over the last 10 minutes it predicts an hour ahead about as well as anything tried (2.9-3.2 %-points
 // off, against 5.8 for a fixed rate), and unlike the battery's own slope it also works before the outage.
-const DRAIN_BASE = 2.61;
-const DRAIN_PER_W = 0.1022;
+const DRAIN_BASE = 2.09;
+const DRAIN_PER_W = 0.1043;
 const RECENT_MS = 10 * 60e3;
 const FLOOR = 18; // watts: the station reports 0 for anything smaller (the lowest non-zero value it has ever sent)
 
@@ -169,7 +170,7 @@ function predict(load) {
       level = Math.max(floor, level - rate * span);
       charging = true; // the grid's return starts a recharge
     } else if (charging) {
-      level = Math.min(top, level + CHARGE * span);
+      level = Math.min(top, level + (d.ac_charging_speed ?? 0) * CHARGE_PER_W * span);
       charging = level < top;
     }
     t = next;
