@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="refresh" content="60">
+  <title>Світло вдома</title>
+  <link rel="icon" href="{{ asset('favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
+</head>
+<body>
+  <div class="container">
+    {% if updated %}
+    <p class="updated {{ 'stale' if stale }}">{{ 'Немає нових даних з ' ~ updated ~ ': станція або інтернет вимкнені' if stale else 'Оновлено о ' ~ updated }}</p>
+    {% else %}
+    <p class="updated stale">Немає даних</p>
+    {% endif %}
+
+    <div class="stats">
+      <div class="card"><h2>Світло</h2><div class="stat-value {{ 'off' if not grid_on }}">{{ 'Є' if grid_on else 'Немає' }}</div><div class="stat-sub">{{ 'від мережі' if grid_on else 'працює від батареї' }}</div></div>
+      <div class="card"><h2>Батарея</h2><div class="stat-value">{{ battery if battery is not none else '—' }}{{ '%' if battery is not none }}</div><div class="stat-sub">вимкнеться на {{ floor }}%</div></div>
+      {% for name, left, note in lasts %}
+      <div class="card"><h2>{{ name }}</h2><div class="stat-value">{{ left }}</div><div class="stat-sub">{{ note }}{{ ', якщо зникне світло' if grid_on }}</div></div>
+      {% endfor %}
+    </div>
+
+    <div class="card">
+      <h2>Можливі відключення</h2>
+      {% for when in slots %}<div class="stat-sub">{{ when }}</div>{% else %}<div class="stat-sub">не заплановані</div>{% endfor %}
+    </div>
+  </div>
+</body>
+</html>

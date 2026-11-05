@@ -18,11 +18,11 @@ import sqlite3
 import tempfile
 import time
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, jsonify, make_response, redirect, render_template, request, session, url_for
 
 DB = Path(os.environ.get("ECOFLOW_DB", "/home/pi/data/ecoflow/ecoflow.db"))
 # Both sit on /run. The collector writes LIVE every second while it holds the Bluetooth
@@ -112,6 +112,76 @@ def logout():
 @require_login
 def index():
     return render_template("index.html")
+
+
+PC_WATTS = (170, 250)  # the load with the PC on: 171 W average over 35 outages, ~250 W gaming
+
+
+def drain_at(watts: float) -> float:
+    """Battery %/h at this load: the fit on 49 outages, the same one static/app.js uses."""
+    return 2.09 + 0.1043 * watts
+
+
+def hours_text(hours: float) -> str:
+    h, m = divmod(round(hours * 60), 60)
+    if not h:
+        return f"{m} хв"
+    return f"{h} год {m} хв" if h < 10 and m else f"{h} год"
+
+
+def possible_outages(outages: dict, now: datetime) -> list[str]:
+    """Posted windows and outages at home that haven't ended, soonest first, as text."""
+    found = set()
+    for day, d in outages.get("days", {}).items():
+        midnight = datetime.fromisoformat(day)
+        for a, b in d.get("windows", []):
+            found.add(tuple(midnight + timedelta(hours=int(t[:2]), minutes=int(t[3:])) for t in (a, b)))
+    for e in outages.get("unplanned", []):
+        found.add((datetime.fromisoformat(e["start"]), datetime.fromisoformat(e["stop"])))
+    days = {now.date(): "сьогодні", (now + timedelta(days=1)).date(): "завтра"}
+    out = []
+    for start, end in sorted(s for s in found if s[1] > now)[:4]:
+        stop = "24:00" if end.time() == datetime.min.time() and end.date() > start.date() else f"{end:%H:%M}"
+        out.append(f"{days.get(start.date(), f'{start:%d.%m}')} {start:%H:%M}–{stop}" + (" (зараз)" if start <= now else ""))
+    return out
+
+
+@app.route("/live")
+def family():
+    """The public page for the family: grid, battery, how long it lasts, possible outages.
+    No watts and no history: the load would show when someone is home."""
+    d = read(latest)
+    # the load averaged over the last 10 minutes, as the main page's forecast does
+    recent = read(lambda db: db.execute("SELECT AVG(output_power) FROM readings WHERE ts >= ?", (d.get("ts", 0) - 600,)).fetchone()[0])
+    try:
+        outages = json.loads(OUTAGES.read_text())
+    except (OSError, ValueError):
+        outages = {}
+    level, floor = d.get("battery_level"), d.get("battery_charge_limit_min") or 0
+    lasts = []
+    if level is not None:
+        above, (low, high) = max(0, level - floor), PC_WATTS
+        span = f"{above / drain_at(high):.1f}–{above / drain_at(low):.1f} год".replace(".", ",")
+        off = outages.get("drain", {}).get("PC off")
+        if recent is not None:
+            # the station reports 0 W below 18 W, while the router and Pi still draw: never faster than "PC off"
+            lasts.append(("Зараз", hours_text(above / max(drain_at(recent), off or 0)), "при поточному навантаженні"))
+        lasts.append(("З комп'ютером", span, f"при {low}–{high} Вт"))
+        if off:
+            lasts.append(("Без комп'ютера", hours_text(above / off), "лише роутер"))
+    ts = d.get("ts")
+    response = make_response(render_template(
+        "live.html",
+        grid_on=(d.get("ac_input_voltage") or 0) > 50 or (d.get("ac_input_power") or 0) > 0,
+        battery=None if level is None else round(level),
+        floor=round(floor),
+        lasts=lasts,
+        slots=possible_outages(outages, datetime.now()),
+        updated=f"{datetime.fromtimestamp(ts):%H:%M}" if ts else None,
+        stale=not ts or time.time() - ts > 180,
+    ))
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
 
 
 def latest(db: sqlite3.Connection) -> dict:
@@ -249,7 +319,26 @@ def demo() -> None:
         assert client.get("/api/live").json == {"ts": 200.5, "battery_level": 41, "live": True}
         os.utime(LIVE, (time.time() - 60, time.time() - 60))
         assert client.get("/api/live").json["live"] is False
+
+        # the family page needs no login and shows no watts
+        with closing(sqlite3.connect(DB)) as stored:
+            stored.execute("DROP TABLE readings")
+            stored.execute("CREATE TABLE readings (ts, battery_level, battery_charge_limit_min, ac_input_voltage, ac_input_power, output_power, raw)")
+            stored.execute("INSERT INTO readings VALUES (?, 55, 15, 0, 0, 171, '{}')", (int(time.time()),))
+            stored.commit()
+        OUTAGES.write_text(json.dumps({"days": {}, "drain": {"PC on": 20, "PC off": 2.8}}))
+        page = client.__class__(app).get("/live")
+        text = page.data.decode()
+        assert page.status_code == 200 and page.headers["X-Robots-Tag"] == "noindex, nofollow", page.status_code
+        assert "Немає" in text and "55%" in text and "14 год 17 хв" not in text and "14 год" in text, text
+        assert "171" not in text and "не заплановані" in text and "1,4–2,0 год" in text and "170–250 Вт" in text, text
+        assert "Зараз</h2><div class=\"stat-value\">2 год" in text, text  # 171 W -> 19.9 %/h, 40 % above the floor
     DB, LIVE, VIEWER, OUTAGES = real
+    now = datetime(2026, 11, 4, 13, 0)
+    got = possible_outages({"days": {"2026-11-04": {"windows": [["06:00", "10:00"], ["12:00", "16:00"], ["18:00", "24:00"]]},
+                                     "2026-11-05": {"windows": [["00:00", "02:00"]]}}}, now)
+    assert got == ["сьогодні 12:00–16:00 (зараз)", "сьогодні 18:00–24:00", "завтра 00:00–02:00"], got
+    assert hours_text(2.0) == "2 год" and hours_text(2.25) == "2 год 15 хв" and hours_text(14.3) == "14 год" and hours_text(0.5) == "30 хв"
 
 
 if __name__ == "__main__":
