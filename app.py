@@ -38,6 +38,8 @@ MAX_HOURS = 24 * 366
 
 app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
+from sso import init_sso  # one login for all *.swoots.dev apps, see sso.py
+init_sso(app)
 app.permanent_session_lifetime = timedelta(days=3650)
 app.config.update(SESSION_COOKIE_SECURE=True, SESSION_COOKIE_SAMESITE="Lax")
 # one request a second from every open tab would bury the journal
