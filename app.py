@@ -32,7 +32,8 @@ VIEWER = Path(os.environ.get("ECOFLOW_VIEWER", "/run/ecoflow-page/viewer"))
 LIVE_FRESH = 5  # seconds a published reading counts as live
 OUTAGES = Path(os.environ.get("ECOFLOW_OUTAGES", "/home/pi/data/ecoflow/outages.json"))  # written by outages.py
 PORT = int(os.environ.get("PORT", 8016))
-CHARTED = ("battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature")
+CHARTED = ("battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature",
+           "battery_charge_limit_min")
 POINTS = 720  # most points a chart gets; a longer range is averaged into buckets
 MAX_HOURS = 24 * 366
 
@@ -198,9 +199,11 @@ def history(db: sqlite3.Connection, hours: float, now: int) -> dict:
     bucket = max(60, int(hours * 3600 / POINTS))
     have = {row[1] for row in db.execute("PRAGMA table_info(readings)")}
     columns = [name for name in CHARTED if name in have]
-    # grid voltage takes the lowest reading in a bucket, so a short outage survives the averaging
+    # grid voltage takes the lowest reading in a bucket, so a short outage survives the averaging;
+    # the cut-off too, so a change lands as one step instead of an averaged in-between value
     picks = ", ".join(
-        f"MIN({name})" if name == "ac_input_voltage" else f"ROUND(AVG({name}), 2)" for name in columns
+        f"MIN({name})" if name in ("ac_input_voltage", "battery_charge_limit_min") else f"ROUND(AVG({name}), 2)"
+        for name in columns
     )
     rows = db.execute(
         f"SELECT (ts / ?) * ? AS t, {picks} FROM readings WHERE ts >= ? GROUP BY t ORDER BY t",

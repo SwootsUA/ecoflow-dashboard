@@ -8,9 +8,10 @@ const STALE_AFTER = 180; // seconds without a reading before the page says so
 const HOLDING_OVER = 24 * 60; // minutes: an estimate longer than a day means the level is not really moving
 const NO_ESTIMATE = 5939; // minutes the station reports when it has no estimate at all
 const STEP = { 1: 600, 6: 3600, 24: 6 * 3600, 168: 86400, 720: 5 * 86400 }; // seconds between x ticks
-const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature"];
+const CHARTED = ["battery_level", "input_power", "output_power", "ac_input_voltage", "inverter_temperature", "battery_charge_limit_min"];
 const TAIL_MAX = 1800; // live readings kept for the charts: half an hour at one a second
-const AHEAD = 2; // hours of forecast right of now (the 1 h view gets 1)
+const AHEAD = 2; // hours of forecast right of now in the 7 d and 30 d views
+const MIRRORED = 24; // up to this range the forecast gets as many hours ahead as the history behind
 // Battery %/h gained per watt of the station's charge-speed setting: 41 %/h at 500 W (21-27 Oct), 62 at 750 W
 // (4 Nov), no slowdown near full. The setting itself comes from the station.
 const CHARGE_PER_W = 0.082;
@@ -179,10 +180,11 @@ function predict(load) {
   return out;
 }
 
-// The right edge: AHEAD hours from now, stretched to show a possible outage that starts inside that
-// whole, plus an hour of the recharge after it.
+// The right edge: as far ahead as the range looks back (1 h, 6 h, 24 h). The longer ranges get AHEAD
+// hours, stretched to show a possible outage that starts inside that whole, plus an hour of the recharge after it.
 function aheadTo(now) {
-  let to = now + Math.min(AHEAD, hours) * 3600e3;
+  if (hours <= MIRRORED) return now + hours * 3600e3;
+  let to = now + AHEAD * 3600e3;
   const next = slots.find(([, end]) => end > now);
   if (next && next[0] < to) to = Math.max(to, next[1] + 3600e3);
   return to;
@@ -341,12 +343,36 @@ function throughCrossings(stepped) {
   return out;
 }
 
+// A setting line: its readings, then its newest value held flat to the end of the time axis.
+function untilTheEdge(stepped) {
+  const lastY = stepped.findLast((p) => p.y != null)?.y;
+  return lastY == null ? stepped : [...stepped, { x: 4102444800000, y: lastY }];
+}
+
+// Hover takes, in every line, its own point nearest the cursor's time. Lines have different points (one a
+// minute for readings, 5-minute steps for forecasts), so Chart.js's "index" mode paired unrelated moments.
+const HOVER_PX = 24;
+Chart.Interaction.modes.eachNearestX = (chart, event) => {
+  const x = Chart.helpers.getRelativePosition(event, chart).x;
+  const items = [];
+  chart.data.datasets.forEach((set, datasetIndex) => {
+    if (!chart.isDatasetVisible(datasetIndex)) return;
+    let best = null;
+    chart.getDatasetMeta(datasetIndex).data.forEach((element, index) => {
+      const off = Math.abs(element.x - x);
+      if (!element.skip && off <= HOVER_PX && (!best || off < best.off)) best = { element, datasetIndex, index, off };
+    });
+    if (best) items.push(best);
+  });
+  return items;
+};
+
 function draw(id, series, y = {}) {
   charts[id]?.destroy();
   charts[id] = new Chart(el(id), {
     type: "line",
     data: {
-      datasets: series.map(({ label, color, column, data, shape, forecast, extra }) => ({
+      datasets: series.map(({ label, color, column, data, shape, forecast, extra = {} }) => ({
         label,
         column,
         shape,
@@ -357,20 +383,23 @@ function draw(id, series, y = {}) {
         borderWidth: 2,
         pointRadius: 0,
         pointHitRadius: 12,
-        spanGaps: false,
+        // a hole in the readings (points() puts a null there) is bridged by a dashed line
+        spanGaps: Boolean(column),
         ...extra,
+        segment: { borderDash: (ctx) => (column && (ctx.p0.skip || ctx.p1.skip) ? [4, 4] : undefined), ...extra.segment },
       })),
     },
     options: {
       parsing: false,
       animation: false,
       maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
+      interaction: { mode: "eachNearestX", intersect: false },
       plugins: {
         legend: { display: series.length > 1, labels: { color: css("--fg"), boxWidth: 12, boxHeight: 2 } },
         tooltip: {
-          filter: (item) => Boolean(item.dataset.column), // readings only, not the marker lines
+          filter: (item) => Boolean(item.dataset.column || item.dataset.forecast), // not the marker lines
           callbacks: {
+            label: (item) => `${item.dataset.label}: ${num(item.parsed.y, item.dataset.forecast ? 0 : 1)}`,
             title: (items) =>
               new Date(items[0].parsed.x).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
           },
@@ -425,6 +454,14 @@ async function loadHistory() {
       { label: "Forecast, PC on", color: css("--series2"), forecast: "PC on", extra: dashed },
       { label: "Forecast, PC off", color: css("--fg2"), forecast: "PC off", extra: dashed },
       { label: "Possible outage", color: css("--red") }, // no points of its own; the bands are drawn by outageBands
+      {
+        // the discharge limit as it was set at each moment, carried on to the right edge at its newest value
+        label: "Cut-off",
+        color: css("--red"),
+        column: "battery_charge_limit_min",
+        shape: untilTheEdge,
+        extra: { borderDash: [6, 4], borderWidth: 1.5, stepped: true, pointHitRadius: 0 },
+      },
     ],
     { min: 0, max: 100 },
   );
@@ -472,11 +509,23 @@ async function loadHistory() {
   el("power-note").textContent = `average in ${num(mean(power.data.datasets[2]))}, out ${num(mean(power.data.datasets[1]))}`;
 }
 
+// The chosen range survives a reload; storage can be off (private window), so it is only a convenience.
+const RANGE_KEY = "power.hours";
+const pickRange = (button) => {
+  hours = Number(button.dataset.hours);
+  document.querySelector("[data-hours].active")?.classList.remove("active");
+  button.classList.add("active");
+};
+try {
+  const saved = document.querySelector(`[data-hours="${Number(localStorage.getItem(RANGE_KEY))}"]`);
+  if (saved) pickRange(saved);
+} catch {}
 for (const button of document.querySelectorAll("[data-hours]")) {
   button.addEventListener("click", () => {
-    hours = Number(button.dataset.hours);
-    document.querySelector("[data-hours].active")?.classList.remove("active");
-    button.classList.add("active");
+    pickRange(button);
+    try {
+      localStorage.setItem(RANGE_KEY, String(hours));
+    } catch {}
     loadHistory();
   });
 }
