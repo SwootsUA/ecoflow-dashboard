@@ -18,7 +18,7 @@
     {% endif %}
 
     <div class="stats">
-      <div class="card"><h2>Світло</h2><div class="stat-value {{ 'off' if not grid_on }}">{{ 'Є' if grid_on else 'Немає' }}</div><div class="stat-sub">{{ 'від мережі' if grid_on else 'працює від батареї' }}</div></div>
+      <div class="card"><h2>Світло</h2><div class="stat-value {{ 'off' if not grid_on }}">{{ 'Є' if grid_on else 'Немає' }}</div><div class="stat-sub">{{ 'від мережі' if grid_on else ('напруга ' ~ refused_v ~ ' В, замала: працює від батареї' if refused_v else 'працює від батареї') }}</div></div>
       <div class="card"><h2>Батарея</h2><div class="stat-value">{{ battery if battery is not none else '—' }}{{ '%' if battery is not none }}</div><div class="stat-sub">вимкнеться на {{ floor }}%</div></div>
       {% for name, left, note in lasts %}
       <div class="card"><h2>{{ name }}</h2><div class="stat-value">{{ left }}</div><div class="stat-sub">{{ note }}{{ ', якщо зникне світло' if grid_on }}</div></div>

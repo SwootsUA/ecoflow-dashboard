@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import outages
+from grid import ON_GRID_SQL, on_grid, refused
 from ble_read import Station
 
 # the library warns on every disconnect, and every read ends with one
@@ -52,11 +53,6 @@ def save(db: sqlite3.Connection, values: dict, ts: int) -> None:
     db.commit()
 
 
-def on_grid(voltage, power) -> bool:
-    """The page's rule: inverter voltage, or input watts while charging with the inverter reading 0."""
-    return (voltage or 0) > 50 or (power or 0) > 0
-
-
 def grid_change(db: sqlite3.Connection, values: dict, ts: int) -> str | None:
     """The Telegram message when this reading flips the grid against the last stored row, else None.
 
@@ -65,19 +61,26 @@ def grid_change(db: sqlite3.Connection, values: dict, ts: int) -> str | None:
     Every outage counts, posted or not, and an unplugged station looks the same as a dead grid.
     """
     try:
-        last = db.execute("SELECT ac_input_voltage, ac_input_power FROM readings ORDER BY ts DESC LIMIT 1").fetchone()
-    except sqlite3.OperationalError:  # a new database: no grid columns until the first row
+        cur = db.execute("SELECT * FROM readings ORDER BY ts DESC LIMIT 1")
+        row = cur.fetchone()
+    except sqlite3.OperationalError:  # no readings table yet
         return None
-    now = on_grid(values.get("ac_input_voltage"), values.get("ac_input_power"))
-    if last is None or on_grid(*last) == now:
+    if row is None:
+        return None
+    last = dict(zip((c[0] for c in cur.description), row))
+    now = on_grid(values)
+    if on_grid(last) == now:
         return None
     clock = time.strftime("%H:%M", time.localtime(ts))
     battery = values.get("battery_level") or 0
     if not now:
         line = outages.battery_line({"battery_level": battery,
                                      "battery_charge_limit_min": values.get("battery_charge_limit_min") or 0})
+        if refused(values):
+            return (f"🟠 Grid at {values['ac_input_voltage']:.0f} V since {clock}, too low: "
+                    f"EcoFlow refuses it, on battery{line}")
         return f"🔴 No grid since {clock}{line}"
-    on_ts = db.execute("SELECT max(ts) FROM readings WHERE ac_input_voltage > 50 OR ac_input_power > 0").fetchone()[0]
+    on_ts = db.execute(f"SELECT max(ts) FROM readings WHERE {ON_GRID_SQL}").fetchone()[0]
     since = db.execute("SELECT min(ts) FROM readings WHERE ts > ?", (on_ts or 0,)).fetchone()[0]
     gone = outages.lasts((ts - since) / 3600) if since else "?"
     return f"🟢 Grid back {clock} after {gone} · battery {battery:.0f}%"
@@ -171,7 +174,8 @@ class Collector:
 def demo() -> None:
     global LIVE, VIEWER, EVERY, TICK
     grid = open_db(Path(":memory:"))
-    on = {"battery_level": 99.0, "battery_charge_limit_min": 15, "ac_input_voltage": 228, "ac_input_power": 0}
+    on = {"battery_level": 99.0, "battery_charge_limit_min": 15, "ac_input_voltage": 228, "ac_input_power": 0,
+          "input_power": 120, "output_power": 110}
     off = dict(on, ac_input_voltage=0)
     t0 = 1792400000  # stamps in local time below
     assert grid_change(grid, on, t0) is None  # nothing stored yet
@@ -182,6 +186,9 @@ def demo() -> None:
     save(grid, dict(off, battery_level=70.0), t0 + 7260)
     back = grid_change(grid, dict(on, battery_level=70.0, ac_input_voltage=0, ac_input_power=700), t0 + 7320)
     assert back == f"🟢 Grid back {time.strftime('%H:%M', time.localtime(t0 + 7320))} after 2h01 · battery 70%", back
+    save(grid, dict(on, battery_level=70.0), t0 + 7320)
+    sag = dict(on, battery_level=70.0, ac_input_voltage=166.2, input_power=0)
+    assert grid_change(grid, sag, t0 + 7380).startswith("🟠 Grid at 166 V since"), grid_change(grid, sag, t0 + 7380)
 
     db = open_db(":memory:")
     save(db, {"battery_level": 88.7, "ac_ports": True, "battery_1_sn": None}, 1)

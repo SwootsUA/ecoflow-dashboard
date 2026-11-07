@@ -39,6 +39,7 @@ MAX_HOURS = 24 * 366
 
 app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
+from grid import on_grid, refused
 from sso import init_sso  # one login for all *.swoots.dev apps, see sso.py
 init_sso(app)
 app.permanent_session_lifetime = timedelta(days=3650)
@@ -175,7 +176,8 @@ def family():
     ts = d.get("ts")
     response = make_response(render_template(
         "live.html",
-        grid_on=(d.get("ac_input_voltage") or 0) > 50 or (d.get("ac_input_power") or 0) > 0,
+        grid_on=on_grid(d),
+        refused_v=round(d["ac_input_voltage"]) if refused(d) else None,
         battery=None if level is None else round(level),
         floor=round(floor),
         lasts=lasts,

@@ -62,13 +62,19 @@ function showAge() {
   else el("updated").textContent = live ? `Live, ${at}` : `Updated ${at}, ${ago(age)}`;
 }
 
+// Mirrors grid.py: voltage on the input means the grid is there, unless the station refuses a sagging
+// line, which shows as voltage, 0 W taken in and the battery carrying the load.
+const refused = (d) =>
+  d.ac_input_voltage > 50 && !(d.ac_input_power > 0) && d.input_power === 0 && d.output_power > 20;
+const onGrid = (d) => (d.ac_input_voltage > 50 || d.ac_input_power > 0) && !refused(d);
+
 function showLatest(d) {
   const first = !last.ts;
   const fresh = d.ts !== last.ts;
   last = d;
   showAge();
 
-  const gridOn = d.ac_input_voltage > 50 || d.ac_input_power > 0;
+  const gridOn = onGrid(d);
   const net = (d.input_power ?? 0) - (d.output_power ?? 0);
   const emptying = !gridOn || net < 0;
   const minutes = emptying ? d.remaining_time_discharging : net > 0 ? d.remaining_time_charging : null;
@@ -82,7 +88,9 @@ function showLatest(d) {
 
   const stats = [
     ["Battery", `${num(d.battery_level, 1)}%`, `limits ${num(d.battery_charge_limit_min)}–${num(d.battery_charge_limit_max)}%`],
-    ["Grid", gridOn ? "On" : "Off", gridOn ? `${num(d.ac_input_voltage)} V` : "running on battery", gridOn ? "" : "off"],
+    refused(d)
+      ? ["Grid", "Refused", `${num(d.ac_input_voltage)} V, too low · running on battery`, "off"]
+      : ["Grid", gridOn ? "On" : "Off", gridOn ? `${num(d.ac_input_voltage)} V` : "running on battery", gridOn ? "" : "off"],
     ["Output", `${num(d.output_power)} W`, `input ${num(d.input_power)} W`],
     left,
   ];
@@ -160,7 +168,7 @@ function predict(load) {
   const top = d.battery_charge_limit_max ?? 100;
   let t = d.ts * 1000;
   // off the grid now: assume it stays off to the end of the slot it falls in, or to the edge if none
-  const offUntil = d.ac_input_voltage > 50 || d.ac_input_power > 0 ? 0 : (slots.find(([s, e]) => s <= t && t < e)?.[1] ?? Infinity);
+  const offUntil = onGrid(d) ? 0 : (slots.find(([s, e]) => s <= t && t < e)?.[1] ?? Infinity);
   let charging = (d.input_power ?? 0) - (d.output_power ?? 0) > 50;
   let level = d.battery_level;
   const out = [{ x: t, y: level }];
