@@ -307,7 +307,7 @@ def fine_history(db: sqlite3.Connection, columns: list, since: int, until: int, 
     # the minute rows are the heartbeat: a bucket with no row within 90 s was a stretch without the collector
     beats = [row[0] for row in db.execute("SELECT ts FROM readings WHERE ts > ? AND ts <= ? ORDER BY ts", (since - 90, until + 90))]
     rows, i = [], 0
-    for b in range(since // bucket * bucket, until + 1, bucket):
+    for b in range(since // bucket * bucket, until, bucket):  # the bucket at until has no time in it yet
         while i < len(beats) and beats[i] < b - 90:
             i += 1
         if i < len(beats) and beats[i] <= b + bucket + 90:
@@ -480,6 +480,7 @@ def demo() -> None:
     by = {row[0]: row[1] for row in got["rows"]}
     assert got["bucket"] == 5 and by[995] == 50.0 and by[1000] == 49.0 and by[3595] == 49.0, got["rows"][:3]
     assert 2100 not in by and 1700 in by  # the collector was off 1800-2400: no buckets there
+    assert 3600 not in by and all(v is not None for v in by.values())  # no empty bucket at the end
     assert fine_history(fine, ["battery_level"], -100, 3600, 5) is None  # asks for more than the log holds
     db.execute("ALTER TABLE readings ADD COLUMN raw DEFAULT '{}'")
     assert latest(db)["note"] == "c" and "raw" not in latest(db)
