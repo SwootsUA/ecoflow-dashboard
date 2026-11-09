@@ -80,6 +80,16 @@ input[type="password"] {
   padding: 0.5rem 0.75rem; font-size: 0.95rem;
 }
 input:focus { outline: none; border-color: var(--accent); }
+.settings label { display: flex; flex-direction: column; gap: 0.3rem; color: var(--fg2); font-size: 0.85rem; }
+.settings input[type="number"] {
+  width: 7rem; background: var(--bg3); color: var(--fg);
+  border: 1px solid #333; border-radius: var(--radius); padding: 0.45rem 0.6rem; font-size: 0.95rem;
+}
+.settings .btn { align-self: flex-end; }
+.settings-status { align-self: flex-end; color: var(--fg2); font-size: 0.85rem; }
+.settings-status.ok { color: var(--green); }
+.settings-status.bad { color: var(--red); }
+.release { margin-top: 0.75rem; }
 
 .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
 .error { color: var(--red); margin: 0 0 0.75rem; font-size: 0.85rem; }

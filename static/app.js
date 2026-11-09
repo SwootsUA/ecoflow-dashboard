@@ -73,6 +73,7 @@ function showLatest(d) {
   const fresh = d.ts !== last.ts;
   last = d;
   showAge();
+  fillSettings(d);
 
   const gridOn = onGrid(d);
   const net = (d.input_power ?? 0) - (d.output_power ?? 0);
@@ -81,10 +82,17 @@ function showLatest(d) {
   // The station counts down to 0%, but it stops at its discharge limit: only the part above that is time left.
   const floor = d.battery_charge_limit_min ?? 0;
   const toFloor = Math.round((minutes * Math.max(0, d.battery_level - floor)) / d.battery_level);
+  // Off the grid: the fit on the last 10 minutes' load, as the family page (/live) shows it. The station's
+  // own figure follows the load of this very second, so it jumps with every PC spike; it stays as a note.
+  // computed on the server, so the family page (/live) shows the very same number
+  const watts = gridOn ? null : d.load_10min ?? null;
+  const fitted = gridOn || d.hours_left == null ? null : Math.round(d.hours_left * 60);
   let left = ["Time left", "—", "holding level"];
   // a day-long estimate on the grid means the level isn't moving; off the grid it is real (PC off lasts ~25 h)
   if (minutes > 0 && minutes < NO_ESTIMATE && (minutes <= HOLDING_OVER || !gridOn))
     left = emptying ? [`Until ${num(floor)}%`, duration(toFloor), "at this load"] : ["Until full", duration(minutes), "at this rate"];
+  if (fitted != null)
+    left = [`Until ${num(floor)}%`, duration(fitted), `at the last 10 min load (${num(watts)} W)` + (minutes > 0 ? ` · station says ${duration(toFloor)}` : "")];
 
   const stats = [
     ["Battery", `${num(d.battery_level, 1)}%`, `limits ${num(d.battery_charge_limit_min)}–${num(d.battery_charge_limit_max)}%`],
@@ -548,3 +556,55 @@ setInterval(showAge, 1000);
 setInterval(() => last.live && !document.hidden && loadHistory(), 300_000);
 loadOutages();
 setInterval(loadOutages, 300_000);
+
+// Station settings: the form shows the station's current values until you edit it; Apply sends only
+// what differs, then waits for the collector's answer (it applies them over its Bluetooth link).
+const settingsForm = el("settings");
+let settingsEdited = false;
+function fillSettings(d) {
+  if (settingsEdited) return;
+  for (const input of settingsForm.elements) if (input.name && d[input.name] != null) input.value = d[input.name];
+}
+function settingsStatus(text, kind = "") {
+  el("settings-status").textContent = text;
+  el("settings-status").className = `settings-status ${kind}`;
+}
+settingsForm.addEventListener("input", () => (settingsEdited = true));
+
+// The Pi holds the station's Bluetooth link; this frees it for the phone app for 10 minutes
+let releasedUntil = null;
+function showRelease(until) {
+  releasedUntil = until;
+  el("release").textContent = until ? "Take Bluetooth back now" : "Free Bluetooth for the app (10 min)";
+  el("release-status").textContent = until
+    ? `free for the app until ${new Date(until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : "";
+}
+async function release(on) {
+  const r = await fetch("/api/release", on == null ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }) });
+  if (r.ok) showRelease((await r.json()).until);
+}
+el("release").addEventListener("click", () => release(!releasedUntil));
+release();
+setInterval(() => releasedUntil && release(), 30_000);
+settingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const changed = {};
+  for (const input of settingsForm.elements)
+    if (input.name && Number(input.value) !== last[input.name]) changed[input.name] = Number(input.value);
+  if (!Object.keys(changed).length) return settingsStatus("Nothing changed");
+  settingsStatus("Sending…");
+  const sent = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changed) });
+  const queued = await sent.json();
+  if (!sent.ok) return settingsStatus(queued.error || `Error ${sent.status}`, "bad");
+  settingsStatus("Waiting for the station…");
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const { result } = await fetch("/api/settings").then((r) => r.json());
+    if (result?.id !== queued.id) continue;
+    if (!result.ok) return settingsStatus(result.error, "bad");
+    settingsEdited = false;
+    return settingsStatus(`Applied at ${new Date(result.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`, "ok");
+  }
+  settingsStatus("No answer in a minute: is the collector running?", "bad");
+});

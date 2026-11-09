@@ -11,6 +11,7 @@
   <nav>
     <a href="/" class="brand">🔋 ecoflow</a>
     <div class="nav-links">
+      <a href="/live">Family page</a>
       <a href="https://admin.swoots.dev">Admin</a>
       <a href="{{ url_for('logout') }}">Logout</a>
     </div>
@@ -46,6 +47,21 @@
     <div class="card">
       <h2>Inverter, °C <span id="inverter-note"></span></h2>
       <div class="chart"><canvas id="chart-inverter"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>Station settings <span>sent over Bluetooth, applied in a few seconds</span></h2>
+      <form id="settings" class="row settings">
+        <label>Cut-off, % <input type="number" name="battery_charge_limit_min" min="0" max="30" step="1" required></label>
+        <label>Charge limit, % <input type="number" name="battery_charge_limit_max" min="50" max="100" step="1" required></label>
+        <label>AC charging, W <input type="number" name="ac_charging_speed" min="200" max="1200" step="100" required></label>
+        <button class="btn btn-sm" type="submit">Apply</button>
+        <span id="settings-status" class="settings-status"></span>
+      </form>
+      <div class="row release">
+        <button class="btn btn-sm btn-ghost" id="release" type="button">Free Bluetooth for the app (10 min)</button>
+        <span id="release-status" class="settings-status"></span>
+      </div>
     </div>
 
     <details class="card">
