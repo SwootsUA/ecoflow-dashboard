@@ -322,7 +322,25 @@ function points(name) {
     before = ts;
   };
   for (const row of stored.rows) if (row[0] < liveFrom) add(row[0], column < 0 ? null : row[column]);
-  for (const reading of tail) add(reading.ts, reading[name]);
+  // live readings come every second and the load jitters; averaged into the chart's own buckets they
+  // match the stored line (the lowest per bucket where the stored line keeps the lowest, as for the grid)
+  const low = name === "ac_input_voltage" || name === "battery_charge_limit_min";
+  let slot = null;
+  const close = () => slot && add(slot.b, slot.n ? (low ? slot.min : slot.sum / slot.n) : null);
+  for (const reading of tail) {
+    const b = Math.floor(reading.ts / stored.bucket) * stored.bucket;
+    if (!slot || slot.b !== b) {
+      close();
+      slot = { b, sum: 0, n: 0, min: Infinity };
+    }
+    const y = reading[name];
+    if (y != null) {
+      slot.sum += y;
+      slot.n += 1;
+      slot.min = Math.min(slot.min, y);
+    }
+  }
+  close();
   // only with a live stretch: without one, every stored row is already in
   if (tail.length) for (const row of stored.rows) if (row[0] > liveTo) add(row[0], column < 0 ? null : row[column]);
   return out;

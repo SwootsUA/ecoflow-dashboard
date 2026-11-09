@@ -248,21 +248,23 @@ def history(db: sqlite3.Connection, hours: float, now: int) -> dict:
     have = {row[1] for row in db.execute("PRAGMA table_info(readings)")}
     columns = [name for name in CHARTED if name in have]
     fine = int(hours * 3600 / POINTS)
-    if fine < 60:  # 1 h and 6 h views: per-second detail from the change log, when it reaches back far enough
+    if fine < 60:  # 1 h and 6 h views: per-second detail from the change log, minute rows before it began
         got = fine_history(db, columns, now - int(hours * 3600), now, max(1, fine))
         if got:
             return got
+    rows = minute_rows(db, columns, now - int(hours * 3600), now + 1, bucket)
+    return {"bucket": bucket, "columns": ["ts", *columns], "rows": rows}
+
+
+def minute_rows(db: sqlite3.Connection, columns: list, since: int, until: int, bucket: int) -> list:
     # grid voltage takes the lowest reading in a bucket, so a short outage survives the averaging;
     # the cut-off too, so a change lands as one step instead of an averaged in-between value
-    picks = ", ".join(
-        f"MIN({name})" if name in MIN_COLUMNS else f"ROUND(AVG({name}), 2)"
-        for name in columns
-    )
+    picks = ", ".join(f"MIN({name})" if name in MIN_COLUMNS else f"ROUND(AVG({name}), 2)" for name in columns)
     rows = db.execute(
-        f"SELECT (ts / ?) * ? AS t, {picks} FROM readings WHERE ts >= ? GROUP BY t ORDER BY t",
-        (bucket, bucket, now - int(hours * 3600)),
+        f"SELECT (ts / ?) * ? AS t, {picks} FROM readings WHERE ts >= ? AND ts < ? GROUP BY t ORDER BY t",
+        (bucket, bucket, since, until),
     )
-    return {"bucket": bucket, "columns": ["ts", *columns], "rows": [list(row) for row in rows]}
+    return [list(row) for row in rows]
 
 
 MIN_COLUMNS = ("ac_input_voltage", "battery_charge_limit_min")  # a short dip survives, a change lands as one step
@@ -287,14 +289,18 @@ def step_buckets(start, events, since: int, until: int, bucket: int, low: bool) 
 
 
 def fine_history(db: sqlite3.Connection, columns: list, since: int, until: int, bucket: int) -> dict | None:
-    """Buckets under a minute, rebuilt from the per-second change log; None while the log doesn't reach back."""
+    """Buckets under a minute, rebuilt from the per-second change log; minute rows before the log began."""
     try:
         first = db.execute("SELECT MIN(ts) FROM changes").fetchone()[0]
         ids = dict(db.execute(f"SELECT name, id FROM fields WHERE name IN ({','.join('?' * len(columns))})", columns))
     except sqlite3.OperationalError:  # no change log yet
         return None
-    if first is None or first > since:
+    if first is None:
         return None
+    before = []
+    if first > since:  # the log began inside this range: minute rows up to there
+        before = minute_rows(db, columns, since, first, 60)
+        since = first
     series = {}
     for name in columns:
         if name not in ids:
@@ -312,7 +318,7 @@ def fine_history(db: sqlite3.Connection, columns: list, since: int, until: int, 
             i += 1
         if i < len(beats) and beats[i] <= b + bucket + 90:
             rows.append([b, *[series.get(name, {}).get(b) for name in columns]])
-    return {"bucket": bucket, "columns": ["ts", *columns], "rows": rows}
+    return {"bucket": bucket, "columns": ["ts", *columns], "rows": before + rows}
 
 
 def as_csv(db: sqlite3.Connection, hours: float, now: int) -> str:
@@ -481,7 +487,10 @@ def demo() -> None:
     assert got["bucket"] == 5 and by[995] == 50.0 and by[1000] == 49.0 and by[3595] == 49.0, got["rows"][:3]
     assert 2100 not in by and 1700 in by  # the collector was off 1800-2400: no buckets there
     assert 3600 not in by and all(v is not None for v in by.values())  # no empty bucket at the end
-    assert fine_history(fine, ["battery_level"], -100, 3600, 5) is None  # asks for more than the log holds
+    # the log began at 0: an earlier start gets minute rows up to 0, then the per-second part
+    fine.execute("INSERT INTO readings VALUES (-120, 51)")
+    got = fine_history(fine, ["battery_level"], -150, 3600, 5)["rows"]
+    assert got[0] == [-120, 51.0] and got[1][0] == 0, got[:3]
     db.execute("ALTER TABLE readings ADD COLUMN raw DEFAULT '{}'")
     assert latest(db)["note"] == "c" and "raw" not in latest(db)
 
