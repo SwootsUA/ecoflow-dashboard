@@ -178,8 +178,10 @@ def newest() -> dict:
 
 
 def time_left(d: dict, outages: dict) -> tuple[float, float] | None:
-    """Hours to the cut-off at the last 10 minutes' load, and that load: the one figure both pages show.
-    The station reports 0 W below 18 W while the router and Pi still draw, so never faster than "PC off"."""
+    """Hours to the cut-off at the recent load, and that load: the one figure both pages show. The load is the
+    collector's average of its per-second readings over the last minute; without a live collector, the stored
+    rows of the last 10 minutes. The station reports 0 W below 18 W while the router and Pi still draw, so never
+    faster than "PC off"."""
     level = d.get("battery_level")
     since = int(d.get("ts") or 0) - 600
     def average(db):
@@ -187,7 +189,7 @@ def time_left(d: dict, outages: dict) -> tuple[float, float] | None:
             return db.execute("SELECT AVG(output_power) FROM readings WHERE ts >= ?", (since,)).fetchone()[0]
         except sqlite3.OperationalError:  # no load column yet: a fresh database
             return None
-    watts = read(average)
+    watts = d["load_1min"] if d.get("load_1min") is not None else read(average)
     if level is None or watts is None:
         return None
     above = max(0, level - (d.get("battery_charge_limit_min") or 0))
@@ -364,7 +366,7 @@ def api_live():
         live = False  # no collector running, or nothing published yet: the last stored reading will do
     d = newest()
     left = time_left(d, load_outages())
-    extra = {"hours_left": left[0], "load_10min": round(left[1])} if left else {}
+    extra = {"hours_left": left[0], "load_recent": round(left[1])} if left else {}
     return jsonify(d | {"live": live} | extra)
 
 
@@ -562,7 +564,10 @@ def demo() -> None:
         assert "Зараз</h2><div class=\"stat-value\">2 год" in text, text  # 171 W -> 19.9 %/h, 40 % above the floor
         # the main page shows the same figure, from /api/live
         live = client.get("/api/live").json
-        assert live["load_10min"] == 171 and abs(live["hours_left"] - 40 / drain_at(171)) < 1e-9, live
+        assert live["load_recent"] == 171 and abs(live["hours_left"] - 40 / drain_at(171)) < 1e-9, live
+        # a live collector's 1-minute load wins over the stored rows
+        assert abs(time_left({"battery_level": 55, "battery_charge_limit_min": 15, "ts": int(time.time()), "load_1min": 300},
+                             {})[0] - 40 / drain_at(300)) < 1e-9
         assert hours_text(live["hours_left"]) in text
     DB, LIVE, VIEWER, OUTAGES, REQUEST, RESULT, RELEASE = real
     now = datetime(2026, 11, 4, 13, 0)

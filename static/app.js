@@ -82,17 +82,17 @@ function showLatest(d) {
   // The station counts down to 0%, but it stops at its discharge limit: only the part above that is time left.
   const floor = d.battery_charge_limit_min ?? 0;
   const toFloor = Math.round((minutes * Math.max(0, d.battery_level - floor)) / d.battery_level);
-  // Off the grid: the fit on the last 10 minutes' load, as the family page (/live) shows it. The station's
+  // Off the grid: the fit on the last minute's load, as the family page (/live) shows it. The station's
   // own figure follows the load of this very second, so it jumps with every PC spike; it stays as a note.
   // computed on the server, so the family page (/live) shows the very same number
-  const watts = gridOn ? null : d.load_10min ?? null;
+  const watts = gridOn ? null : d.load_recent ?? null;
   const fitted = gridOn || d.hours_left == null ? null : Math.round(d.hours_left * 60);
   let left = ["Time left", "—", "holding level"];
   // a day-long estimate on the grid means the level isn't moving; off the grid it is real (PC off lasts ~25 h)
   if (minutes > 0 && minutes < NO_ESTIMATE && (minutes <= HOLDING_OVER || !gridOn))
     left = emptying ? [`Until ${num(floor)}%`, duration(toFloor), "at this load"] : ["Until full", duration(minutes), "at this rate"];
   if (fitted != null)
-    left = [`Until ${num(floor)}%`, duration(fitted), `at the last 10 min load (${num(watts)} W)` + (minutes > 0 ? ` · station says ${duration(toFloor)}` : "")];
+    left = [`Until ${num(floor)}%`, duration(fitted), `at the last minute's load (${num(watts)} W)` + (minutes > 0 ? ` · station says ${duration(toFloor)}` : "")];
 
   const stats = [
     ["Battery", `${num(d.battery_level, 1)}%`, `limits ${num(d.battery_charge_limit_min)}–${num(d.battery_charge_limit_max)}%`],
@@ -167,7 +167,8 @@ function recentWatts() {
 }
 
 function predict(load) {
-  const watts = load === "recent" ? recentWatts() : null;
+  // the server's figure (the collector's last-minute average) when it has one, else the charted points
+  const watts = load === "recent" ? last.load_recent ?? recentWatts() : null;
   if (load === "recent" && watts == null) return [];
   const rate = load === "recent" ? DRAIN_BASE + DRAIN_PER_W * watts : outages.drain?.[load];
   const d = last;
@@ -484,7 +485,7 @@ async function loadHistory() {
     "chart-level",
     [
       { label: "Battery %", color: css("--accent"), column: "battery_level" },
-      { label: "Forecast, last 10 min", color: css("--accent"), forecast: "recent", extra: dashed },
+      { label: "Forecast, last minute's load", color: css("--accent"), forecast: "recent", extra: dashed },
       { label: "Forecast, PC on", color: css("--series2"), forecast: "PC on", extra: dashed },
       { label: "Forecast, PC off", color: css("--fg2"), forecast: "PC off", extra: dashed },
       { label: "Possible outage", color: css("--red") }, // no points of its own; the bands are drawn by outageBands

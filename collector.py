@@ -272,9 +272,13 @@ async def apply(device, request: dict) -> dict:
     return result
 
 
-def publish(values: dict, ts: float) -> None:
+LOAD_WINDOW = 60  # seconds of per-second load averaged for the time-left figure (backtest 2026-11-10: 1 min
+# predicts an hour ahead within ~2 %-points, 10 min ~1.7, but 10 s swings the shown time by up to ~40 min a minute)
+
+
+def publish(values: dict, ts: float, extra: dict | None = None) -> None:
     """The latest reading for the page, swapped in whole so it never reads half a file."""
-    live = {name: value for name, value in values.items() if value is not None and name != "raw"}
+    live = {name: value for name, value in values.items() if value is not None and name != "raw"} | (extra or {})
     try:
         swap = LIVE.with_suffix(".tmp")
         swap.write_text(json.dumps(live | {"ts": ts}))
@@ -291,6 +295,7 @@ class Collector:
         self.row_due = 0.0  # time.monotonic() when the next row is due
         self.guard = SagGuard()
         self.changes = Changes()
+        self.recent = deque()  # (ts, output_power) of the last LOAD_WINDOW seconds
         self.raw_due = 0  # unix time when a minute row next keeps the raw dump
 
     async def session(self) -> None:
@@ -302,7 +307,13 @@ class Collector:
         try:
             while True:
                 values = station.read()
-                publish(values, self.clock())
+                now = self.clock()
+                if values.get("output_power") is not None:
+                    self.recent.append((now, values["output_power"]))
+                while self.recent and self.recent[0][0] < now - LOAD_WINDOW:
+                    self.recent.popleft()
+                load = sum(w for _, w in self.recent) / len(self.recent) if self.recent else None
+                publish(values, now, {"load_1min": round(load, 1)} if load is not None else None)
                 self.changes.observe(values, int(self.clock()))
                 if time.monotonic() >= self.row_due:
                     ts = int(self.clock())
@@ -524,6 +535,8 @@ def _demo_sessions(station) -> None:
     asyncio.run(collector.session())
     assert rows() == 1 and station.closed == 1 and not viewer_present()
     assert json.loads(LIVE.read_text()) == {"battery_level": 50, "ts": 1000}
+    publish({"output_power": 200}, 5, {"load_1min": 180.5})
+    assert json.loads(LIVE.read_text()) == {"output_power": 200, "load_1min": 180.5, "ts": 5}
     assert 0 < collector.row_due - time.monotonic() <= EVERY
 
     # someone watching: the link is held and rows keep their own pace, far fewer than ticks
