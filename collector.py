@@ -276,6 +276,26 @@ LOAD_WINDOW = 60  # seconds of per-second load averaged for the time-left figure
 # predicts an hour ahead within ~2 %-points, 10 min ~1.7, but 10 s swings the shown time by up to ~40 min a minute)
 
 
+LOW_AT = (30, 10)  # minutes to the cut-off that each send one Telegram alert per outage
+
+
+def low_battery(values: dict, load: float | None, warned: set) -> str | None:
+    """The alert when the time left at the last minute's load first drops under a LOW_AT mark, else None.
+    The same drain fit as app.drain_at; warned resets when the grid comes back."""
+    if on_grid(values):
+        warned.clear()
+        return None
+    level, floor = values.get("battery_level"), values.get("battery_charge_limit_min") or 0
+    if level is None or load is None:
+        return None
+    left = max(0, level - floor) / (2.09 + 0.1043 * load) * 60
+    due = {m for m in LOW_AT if left <= m} - warned
+    if not due:
+        return None
+    warned.update(due)
+    return f"🪫 Station: ~{left:.0f} min left at {load:.0f} W · battery {level:.0f}%, cut-off {floor:.0f}%"
+
+
 def publish(values: dict, ts: float, extra: dict | None = None) -> None:
     """The latest reading for the page, swapped in whole so it never reads half a file."""
     live = {name: value for name, value in values.items() if value is not None and name != "raw"} | (extra or {})
@@ -296,6 +316,7 @@ class Collector:
         self.guard = SagGuard()
         self.changes = Changes()
         self.recent = deque()  # (ts, output_power) of the last LOAD_WINDOW seconds
+        self.warned = set()  # LOW_AT marks already sent this outage
         self.raw_due = 0  # unix time when a minute row next keeps the raw dump
 
     async def session(self) -> None:
@@ -314,6 +335,9 @@ class Collector:
                     self.recent.popleft()
                 load = sum(w for _, w in self.recent) / len(self.recent) if self.recent else None
                 publish(values, now, {"load_1min": round(load, 1)} if load is not None else None)
+                low = low_battery(values, load, self.warned)
+                if low:
+                    await asyncio.to_thread(tell, low)
                 self.changes.observe(values, int(self.clock()))
                 if time.monotonic() >= self.row_due:
                     ts = int(self.clock())
@@ -434,8 +458,20 @@ def demo() -> None:
             _demo_settings()
             _demo_sag_guard(Path(tmp, "guard.json"))
             _demo_changes()
+            _demo_low_battery()
     finally:
         LIVE, VIEWER, EVERY, TICK, REQUEST, RESULT, ALWAYS_HOLD, RELEASE = real
+
+
+def _demo_low_battery() -> None:
+    warned = set()
+    off = {"ac_input_voltage": 0, "battery_level": 20, "battery_charge_limit_min": 5}
+    assert low_battery(off, 200, warned) is None  # 15 % at 22.9 %/h = 39 min
+    assert low_battery(dict(off, battery_level=16), 200, warned).startswith("🪫 Station: ~29 min left at 200 W")
+    assert low_battery(dict(off, battery_level=15), 200, warned) is None  # 30 sent once
+    assert "~5 min" in low_battery(dict(off, battery_level=7), 200, warned)  # straight under 10
+    assert low_battery(dict(off, battery_level=6), 200, warned) is None
+    assert low_battery({"ac_input_voltage": 228, "ac_input_power": 500}, 200, warned) is None and not warned
 
 
 def _demo_changes() -> None:
